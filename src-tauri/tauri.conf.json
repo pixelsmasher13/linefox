@@ -1,0 +1,57 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/schema.json",
+  "identifier": "com.openlinefox.dev",
+  "build": {
+    "beforeBuildCommand": "yarn build",
+    "beforeDevCommand": "yarn start",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "security": {
+      "csp": null,
+      "dangerousDisableAssetCspModification": false,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$RESOURCE/*"]
+      }
+    },
+    "windows": [
+      {
+        "height": 720,
+        "resizable": true,
+        "title": "Linefox",
+        "width": 1200,
+        "skipTaskbar": false,
+        "minHeight": 600,
+        "minWidth": 800
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "dmg",
+    "icon": [
+      "icons/icon_16.png",
+      "icons/icon_32.png",
+      "icons/icon_64.png",
+      "icons/icon_128.png",
+      "icons/icon_256.png",
+      "icons/icon_512.png",
+      "icons/icon.icns"
+    ],
+    "resources": [
+      "resources/**/*"
+    ],
+    "copyright": "",
+    "category": "DeveloperTool",
+    "shortDescription": "AI-powered desktop automation for macOS",
+    "longDescription": "Linefox is an AI-powered desktop automation tool that helps you automate repetitive tasks on macOS using natural language.",
+    "macOS": {
+      "entitlements": "entitlements.plist"
+    },
+    "createUpdaterArtifacts": false
+  },
+  "productName": "Linefox",
+  "version": "0.0.1"
+}

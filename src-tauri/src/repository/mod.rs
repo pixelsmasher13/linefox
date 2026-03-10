@@ -1,0 +1,12 @@
+pub mod activity_log_repository;
+pub mod permissions_repository;
+pub mod settings_repository;
+pub mod automation_repository;
+pub mod automation_log_repository;
+pub mod clarification_repository;
+pub mod user_auth_repository;
+pub mod usage_session_repository;
+pub mod automation_execution_repository;
+pub mod task_extracted_data_repository;
+pub mod skill_repository;
+pub mod schedule_repository;

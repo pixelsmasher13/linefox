@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(cargo check:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(npm run build:*)",
+      "Bash(npm run typecheck:*)",
+      "Bash(cd:*)",
+      "Bash(api/billing/buy-credits.ts )",
+      "Bash(api/billing/credits-status.ts )",
+      "Bash(api/billing/stripe-webhook-credits.ts )",
+      "Bash(api/usage/end-credits.ts )",
+      "Bash(database/credits-billing-schema.sql )",
+      "Bash(lib/creditsBillingService.ts )",
+      "Bash(api/billing/status-simple.ts )",
+      "Bash(api/usage/end-simple.ts )",
+      "Bash(api/billing/create-checkout-session.ts )",
+      "Bash(api/billing/create-portal-session.ts )",
+      "Bash(database/simple-billing-schema.sql )",
+      "Bash(lib/simpleBillingService.ts )",
+      "Bash(api/usage/end-with-billing.ts )",
+      "Bash(database/billing-schema.sql )",
+      "Bash(lib/billingService.ts)",
+      "Bash(mkdir:*)",
+      "Read(//Users/pashachikosh/**)",
+      "Bash(npm install:*)",
+      "Bash(curl:*)",
+      "Bash(vercel:*)"
+      "Bash(npm run check:types:*)",
+      "Bash(npm run:*)",
+      "Bash(cd:*)",
+      "Bash(cd:*)",
+      "Bash(cargo:*)"
+      "Bash(rustc --version)",
+      "Bash(cargo --version)",
+      "Read(//Users/pashachikosh/.cargo/git/checkouts/anndists-5388a5683cafa569/2a54a9a/**)",
+      "Bash(rustup:*)",
+      "Read(//Users/pashachikosh/**)"
+
+      "Bash(cd:*)",
+      "Bash(vercel:*)",
+      "Bash(npm run build:*)"
+    ],
+    "deny": []
+  }
+}

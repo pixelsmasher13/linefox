@@ -1,0 +1,1 @@
+-- No rollback — this is the initial schema for a fresh install
