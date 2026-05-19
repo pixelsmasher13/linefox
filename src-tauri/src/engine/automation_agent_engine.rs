@@ -555,6 +555,10 @@ pub async fn execute_automation(
     
     // Clear memory store, objective override, pending user message, and terminal state for new automation
     MEMORY_STORE.lock().unwrap().clear();
+    // Also initialize the structured memory_manager for task mode. Without
+    // this, agent-mode runs leave the manager populated from a prior run and
+    // the next task-mode run sees stale CURRENT MEMORY in its prompts.
+    memory_manager::init_memory(false);
     *CURRENT_OBJECTIVE_OVERRIDE.lock().unwrap() = None;
     *PENDING_USER_MESSAGE.lock().unwrap() = None;
     USER_MESSAGES.lock().unwrap().clear();
@@ -1785,6 +1789,10 @@ async fn execute_reactive_loop(
                 // Handle MemorySave specially since execute_action doesn't process it
                 if new_action.action_type == ActionType::MemorySave {
                     if let Some(mem_text) = new_action.parameters.as_ref().and_then(|p| p.get("memory")) {
+                        // Mirror into the structured memory_manager — the
+                        // prompt reads from there in agent mode.
+                        let _ = memory_manager::save_to_memory(None, mem_text);
+
                         // Save to MEMORY_STORE
                         let mut mem = MEMORY_STORE.lock().unwrap();
                         if !mem.is_empty() {
@@ -2436,6 +2444,9 @@ async fn execute_reactive_loop(
                 // Handle MemorySave specially since execute_action doesn't process it
                 if new_action.action_type == ActionType::MemorySave {
                     if let Some(mem_text) = new_action.parameters.as_ref().and_then(|p| p.get("memory")) {
+                        // Mirror into structured memory_manager so prompts see it.
+                        let _ = memory_manager::save_to_memory(None, mem_text);
+
                         // Save to MEMORY_STORE
                         let mut mem = MEMORY_STORE.lock().unwrap();
                         if !mem.is_empty() {
@@ -2566,8 +2577,14 @@ async fn execute_reactive_loop(
         // Handle MemorySave actions separately (they don't interact with UI)
         if action.action_type == ActionType::MemorySave {
             if let Some(mem_text) = action.parameters.as_ref().and_then(|p| p.get("memory")) {
+                // Mirror into the structured memory_manager so the next prompt's
+                // CURRENT MEMORY block (which reads memory_manager) sees this entry.
+                // Without this, MEMORY_SAVE writes only land in the raw String
+                // store and the LLM never sees what it just saved.
+                let _ = memory_manager::save_to_memory(None, mem_text);
+
                 let mut mem = MEMORY_STORE.lock().unwrap();
-                
+
                 // Prepend new memory (newest at top for easier matching)
                 if !mem.is_empty() {
                     *mem = format!("{}\n---\n{}", mem_text, mem);
@@ -6578,16 +6595,25 @@ fn create_incremental_prompt(
 
     // Add memory block
     {
-        let mem = MEMORY_STORE.lock().unwrap();
+        // Read from memory_manager (structured store), falling back to the
+        // raw MEMORY_STORE if the manager is empty (e.g. mirror missed a path).
+        // This is what populates the agent-mode CURRENT MEMORY block.
+        let mem_contents = memory_manager::get_memory_contents();
+        let raw = MEMORY_STORE.lock().unwrap();
+        let body = if !mem_contents.is_empty() && mem_contents != "<empty>" {
+            mem_contents
+        } else {
+            raw.clone()
+        };
         prompt.push_str("## CURRENT MEMORY\n");
-        if mem.is_empty() {
+        if body.is_empty() {
             prompt.push_str("<empty>\n\n");
         } else {
-            prompt.push_str(mem.as_str());
+            prompt.push_str(&body);
             prompt.push_str("\n\n");
         }
     }
-    
+
     // Add only the actionable elements
     prompt.push_str("\n## Actionable UI Elements\n");
 
@@ -6732,12 +6758,18 @@ fn create_full_text_prompt(app_state: &AppState) -> String {
     
     // Include memory for context
     {
-        let mem = MEMORY_STORE.lock().unwrap();
+        let mem_contents = memory_manager::get_memory_contents();
+        let raw = MEMORY_STORE.lock().unwrap();
+        let body = if !mem_contents.is_empty() && mem_contents != "<empty>" {
+            mem_contents
+        } else {
+            raw.clone()
+        };
         prompt.push_str("\n## CURRENT MEMORY\n");
-        if mem.is_empty() {
+        if body.is_empty() {
             prompt.push_str("<empty>\n");
         } else {
-            prompt.push_str(mem.as_str());
+            prompt.push_str(&body);
             prompt.push_str("\n");
         }
     }
@@ -6837,12 +6869,18 @@ fn create_action_decision_prompt(
     
     // Add memory block
     {
-        let mem = MEMORY_STORE.lock().unwrap();
+        let mem_contents = memory_manager::get_memory_contents();
+        let raw = MEMORY_STORE.lock().unwrap();
+        let body = if !mem_contents.is_empty() && mem_contents != "<empty>" {
+            mem_contents
+        } else {
+            raw.clone()
+        };
         prompt.push_str("\n## CURRENT MEMORY\n");
-        if mem.is_empty() {
+        if body.is_empty() {
             prompt.push_str("<empty>\n");
         } else {
-            prompt.push_str(mem.as_str());
+            prompt.push_str(&body);
             prompt.push_str("\n");
         }
     }
@@ -7177,6 +7215,40 @@ pub async fn execute_automation_agent_mode(
             }));
 
             phase
+        },
+        Err(e) if e.starts_with("DIRECT_RESPONSE:") => {
+            // The orchestrator decided this prompt didn't need an automation —
+            // greeting, factual question, etc. The reply is in the error string.
+            // We complete the run cleanly and surface the reply as a completion
+            // message so the chat shows it as a quick reply, not a failure.
+            let response_body = e.strip_prefix("DIRECT_RESPONSE:").unwrap_or("").to_string();
+            log_and_file("INFO", &format!("Direct response (no execution needed): {}", &response_body[..std::cmp::min(200, response_body.len())]));
+
+            if let Some(run_id) = *CURRENT_EXECUTION_RUN_ID.lock().unwrap() {
+                let _ = app_handle.db(|db| {
+                    crate::repository::automation_execution_repository::create_execution_step_with_type(
+                        db, run_id, 1,
+                        Some(response_body.clone()),
+                        None, "completed", "direct_response",
+                    )
+                });
+            }
+            finalize_execution_run(app_handle, "completed", None);
+
+            let _ = app_handle.emit("automation_completed", serde_json::json!({
+                "automationId": automation.id,
+                "completionMessage": response_body.clone(),
+                "directResponse": true,
+            }));
+            // Also emit the standard completion-message event so the chat
+            // sees it via its existing listener and renders a quick_reply
+            // bubble instead of nothing.
+            let _ = app_handle.emit("automation_completion_message", serde_json::json!({
+                "automationId": automation.id,
+                "message": response_body,
+                "directResponse": true,
+            }));
+            return Ok(());
         },
         Err(e) => {
             log_and_file("ERROR", &format!("Orchestrator failed to create initial plan: {}", e));

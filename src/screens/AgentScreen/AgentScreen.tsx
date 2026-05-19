@@ -743,6 +743,180 @@ export const AutomationScreen: FC = () => {
     }
   };
 
+  /**
+   * Route a prompt typed in the chat input. Matches heelix's handlePromptSubmit:
+   * 1. If there's an active run/task → classify_continuation_prompt
+   *    - quick_reply → just add a quick_reply bubble (no orchestrator)
+   *    - continuation → invoke continue_automation_task
+   * 2. Otherwise → classify_desktop_prompt
+   *    - quick_reply → add a quick_reply bubble (no task generated)
+   *    - needs_clarification → add a clarification_ask bubble
+   *    - new_task / continue_task → handleAIGenerate
+   *
+   * This is what was missing: previously every prompt went straight to
+   * handleAIGenerate, so even "what's up" spun up the orchestrator and the
+   * DIRECT_RESPONSE came back as a completion bubble ("1 STEPS EXECUTED").
+   */
+  const handlePromptSubmit = async (text: string, agentModeFromInput: boolean) => {
+    // Show the user message right away so the UI feels responsive.
+    chatMessages.addMessage(createMessage("user_prompt", "user", text));
+
+    const runId = chatMessages.currentRunId || currentExecutionRunId;
+    const automationId = selectedAutomationId || chatMessages.currentAutomationId;
+
+    // ——— STATE-FIRST: active context → classify continuation vs quick_reply ———
+    if (automationId && runId) {
+      chatMessages.addMessage(createMessage("planning", "assistant", "Thinking..."));
+      setIsGeneratingAI(true);
+
+      const msgs = chatMessages.messages;
+      const completionMsg = [...msgs].reverse().find((m) => m.type === "completion");
+      const previousCompletionMessage = completionMsg?.content || "";
+      const firstUserMsg = msgs.find((m) => m.type === "user_prompt");
+      let previousObjective = firstUserMsg?.content || "";
+      try {
+        const automation = await invoke<any>("get_automation_by_id", { automationId });
+        if (automation?.objective) previousObjective = automation.objective;
+      } catch (_) { /* fallback */ }
+      const stepMsgs = msgs.filter((m) => m.type === "execution_step").slice(-20);
+      const recentSteps = stepMsgs.map((m, i) => {
+        let desc = `Step ${i + 1}`;
+        if (m.content) desc += `: ${m.content}`;
+        const meta = m.metadata as any;
+        if (meta?.nextStep) desc += ` → ${meta.nextStep}`;
+        return desc;
+      });
+      const recentChat = msgs
+        .filter((m) => m.type === "user_prompt" || m.type === "quick_reply")
+        .slice(-10)
+        .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`);
+
+      let decision: { classification: string; reply: string | null; confidence: number };
+      try {
+        decision = await invoke("classify_continuation_prompt", {
+          prompt: text,
+          previousObjective,
+          previousCompletionMessage: previousCompletionMessage || null,
+          recentSteps: recentSteps.length > 0 ? recentSteps : null,
+          chatHistory: recentChat.length > 0 ? recentChat : null,
+          isPlaying,
+        });
+      } catch (error) {
+        console.warn("Continuation classifier failed, defaulting to continuation:", error);
+        decision = { classification: "continuation", reply: null, confidence: 0.5 };
+      }
+
+      if (decision.classification === "quick_reply") {
+        chatMessages.removePlanningMessage();
+        setIsGeneratingAI(false);
+        const reply = decision.reply || "Got it.";
+        chatMessages.addMessage(createMessage("quick_reply", "assistant", reply));
+        return;
+      }
+
+      chatMessages.removePlanningMessage();
+      chatMessages.addMessage(createMessage("planning", "assistant", "Planning continuation..."));
+
+      try {
+        await invoke("continue_automation_task", {
+          automationId,
+          executionRunId: runId,
+          continuationPrompt: text,
+          previousObjective,
+          previousCompletionMessage,
+          recentSteps,
+        });
+        setIsGeneratingAI(false);
+      } catch (error) {
+        console.error("Failed to continue task:", error);
+        chatMessages.removePlanningMessage();
+        setIsGeneratingAI(false);
+        chatMessages.addMessage(
+          createMessage("error", "assistant", error instanceof Error ? error.message : "Failed to continue the task.")
+        );
+      }
+      return;
+    }
+
+    // ——— NO active context → classify_desktop_prompt ———
+    chatMessages.addMessage(createMessage("planning", "assistant", "Thinking..."));
+    setIsGeneratingAI(true);
+
+    const msgs = chatMessages.messages;
+    const firstUserMsg = msgs.find((m) => m.type === "user_prompt");
+    const lastCompletion = [...msgs].reverse().find((m) => m.type === "completion");
+    const lastCompletionTimestamp = lastCompletion?.timestamp;
+    const timeSinceCompletionMs = lastCompletionTimestamp
+      ? Date.now() - new Date(lastCompletionTimestamp).getTime()
+      : undefined;
+    const recentChat = msgs
+      .filter((m) => m.type === "user_prompt" || m.type === "quick_reply")
+      .slice(-10)
+      .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`);
+
+    let result: {
+      classification: string;
+      reply: string | null;
+      clarification_question: string | null;
+      confidence: number;
+    };
+    try {
+      result = await invoke("classify_desktop_prompt", {
+        prompt: text,
+        lastObjective: firstUserMsg?.content || null,
+        lastCompletionMessage: lastCompletion?.content || null,
+        timeSinceCompletionMs: timeSinceCompletionMs || null,
+        chatHistory: recentChat.length > 0 ? recentChat : null,
+      });
+    } catch (error) {
+      console.error("Classification failed, falling back to direct generation:", error);
+      chatMessages.removePlanningMessage();
+      setIsGeneratingAI(false);
+      await handleAIGenerate(text, agentModeFromInput);
+      return;
+    }
+
+    chatMessages.removePlanningMessage();
+    setIsGeneratingAI(false);
+
+    try {
+      switch (result.classification) {
+        case "quick_reply": {
+          const reply = result.reply || "I can help with that! What desktop task would you like me to perform?";
+          chatMessages.addMessage(createMessage("quick_reply", "assistant", reply));
+          break;
+        }
+        case "needs_clarification": {
+          const question = result.clarification_question || "Could you provide more details?";
+          chatMessages.addMessage(
+            createMessage("clarification_ask", "assistant", question, {
+              question,
+              reasoning: "Pre-task clarification: the request is ambiguous",
+              responded: false,
+              preTaskClarification: true,
+              originalPrompt: text,
+              agentMode: agentModeFromInput,
+            } as any)
+          );
+          break;
+        }
+        case "continue_task":
+        case "new_task":
+        default: {
+          await handleAIGenerate(text, agentModeFromInput);
+          break;
+        }
+      }
+    } catch (error) {
+      console.error(`Task dispatch failed (${result.classification}):`, error);
+      chatMessages.removePlanningMessage();
+      setIsGeneratingAI(false);
+      chatMessages.addMessage(
+        createMessage("error", "assistant", error instanceof Error ? error.message : "Failed to handle request")
+      );
+    }
+  };
+
   const handleRecordClick = () => {
     console.log("🔴 Record button clicked. Current state:", { isRecording, isProcessingRecording });
     if (isRecording) {
@@ -1007,7 +1181,9 @@ export const AutomationScreen: FC = () => {
                   setSelectedExecution(null);
                   selectAutomation(null);
                   setSelectedSkill(null);
+                  setIsEditing(false);
                   setShowExecutionView(false);
+                  chatMessages.clearMessages();
                   setSidebarView('tasks');
                 }}
               >
@@ -1032,7 +1208,9 @@ export const AutomationScreen: FC = () => {
                   setSelectedExecution(null);
                   selectAutomation(null);
                   setSelectedSkill(null);
+                  setIsEditing(false);
                   setShowExecutionView(false);
+                  chatMessages.clearMessages();
                   setSidebarView('history');
                 }}
               >
@@ -1399,7 +1577,7 @@ export const AutomationScreen: FC = () => {
               isPlaying={isPlaying}
               isPlanning={isGeneratingAI}
               onSendPrompt={(text, agentModeFromInput) => {
-                handleAIGenerate(text, agentModeFromInput);
+                handlePromptSubmit(text, agentModeFromInput);
               }}
               onSendMessage={async (text) => {
                 chatMessages.addMessage(createMessage("user_prompt", "user", text));
@@ -1411,7 +1589,7 @@ export const AutomationScreen: FC = () => {
               }}
               onStop={handleStopPlayback}
               onContinue={(text) => {
-                handleAIGenerate(text, agentMode);
+                handlePromptSubmit(text, agentMode);
               }}
               onSubmitClarification={(response) => {
                 chatMessages.addMessage(createMessage("clarification_response", "user", response));
@@ -1466,216 +1644,35 @@ export const AutomationScreen: FC = () => {
                 }, 100);
               }}
             />
-          ) : automationScript ? (
-            showExecutionView ? (
-              // Chat-style execution view — replaces the old AutomationExecutionView.
-              // useChatMessages already listens to automation_started / completion /
-              // step / takeover / clarification events and renders them as bubbles.
-              <ChatView
-                messages={chatMessages.messages}
-                isPlaying={isPlaying}
-                isPlanning={isGeneratingAI}
-                onSendPrompt={(text, agentModeFromInput) => {
-                  handleAIGenerate(text, agentModeFromInput);
-                }}
-                onSendMessage={async (text) => {
-                  chatMessages.addMessage(createMessage("user_prompt", "user", text));
-                  try {
-                    await invoke("send_user_message", { message: text.trim() });
-                  } catch (error) {
-                    console.error("Failed to send mid-run message:", error);
-                  }
-                }}
-                onStop={handleStopPlayback}
-                onContinue={(text) => {
-                  // Route follow-ups through the AI generator so the classifier
-                  // can decide between continuation and quick_reply.
-                  handleAIGenerate(text, agentMode);
-                }}
-                onSubmitClarification={(response) => {
-                  chatMessages.addMessage(createMessage("clarification_response", "user", response));
-                  chatMessages.updateLastMessageOfType("clarification_ask", {
-                    metadata: { responded: true } as any,
-                  });
-                  // ClarificationInline already invokes submit_clarification on the
-                  // backend; no extra call needed here.
-                }}
-                onCompleteTakeover={() => {
-                  chatMessages.addMessage(createMessage("takeover_complete", "system", "Manual action completed — agent resuming..."));
-                  chatMessages.updateLastMessageOfType("takeover_request", {
-                    metadata: { completed: true } as any,
-                  });
-                }}
-                executionHeader={selectedExecution == null ? undefined : {
-                  taskName: (automations as any[]).find((a: any) => a.id === (selectedExecution as any).run.automation_id)?.name || "Task Details",
-                  status: (selectedExecution as any).run.status,
-                  startedAt: (selectedExecution as any).run.started_at,
-                  completedAt: (selectedExecution as any).run.completed_at ?? undefined,
-                  automationId: (selectedExecution as any).run.automation_id,
-                  executionRunId: (selectedExecution as any).run.id,
-                  additionalInstructions: (selectedExecution as any).run.additional_instructions ?? undefined,
-                }}
-                onEdit={(automationId) => {
-                  selectAutomation(automationId);
-                  setTimeout(() => setIsEditing(true), 100);
-                }}
-                onSchedule={(automationId, executionRunId) => {
-                  const name = automations.find(a => a.id === automationId)?.name || "";
-                  setScheduleModal({ isOpen: true, automationId, automationName: name, executionRunId });
-                }}
-                onRerun={async (automationId) => {
-                  selectAutomation(automationId);
-                  setSelectedExecution(null);
-                  chatMessages.clearMessages();
-                  const rolePrefix = selectedRole ? `[Role: ${selectedRole.name}]\n${selectedRole.content}\n\n` : '';
-                  setTimeout(() => playAutomation(automationId, rolePrefix, false), 300);
-                }}
-              />
-            ) : (
-              // Show normal view when not playing
-              <MainContent>
-                <AutomationHeader>
-                  <Text type="l" bold>{automationScript.name}</Text>
-                  <Flex gap="2">
-                    {!isEditing && (
-                      <Tooltip label={isLoadingScript ? "Loading task..." : "Edit task"}>                        <IconButton
-                          aria-label="Edit"
-                          icon={<Edit size={20} />}
-                          onClick={() => setIsEditing(true)}
-                          isDisabled={isPlaying || isRecording || isLoadingScript}
-                        />
-                      </Tooltip>
-                    )}
-                  </Flex>
-                </AutomationHeader>
-                
-                <AutomationContent>
-                  <AutomationScriptEditor
-                    script={automationScript}
-                    isEditing={isEditing}
-                    onSave={handleSaveAutomationScript}
-                    onCancel={() => setIsEditing(false)}
-                    onInstructionsChange={handleInstructionsChange}
-                    additionalInstructions={additionalInstructions}
-                  />
-                  
-                  {!isEditing && (
-                    <RunButtonContainer>
-                      <Flex align="center" gap={3}>
-                        <Tooltip
-                          label={agentMode
-                            ? "Agent Mode: AI will break complex tasks into phases and adapt as it goes."
-                            : "Task Mode: AI executes a predefined script."
-                          }
-                          placement="top"
-                          hasArrow
-                        >
-                          <Flex
-                            align="center"
-                            gap={2}
-                            cursor="pointer"
-                            onClick={() => setAgentMode(!agentMode)}
-                          >
-                            <Box
-                              width="36px"
-                              height="20px"
-                              borderRadius="full"
-                              bg={agentMode ? "blue.500" : "gray.200"}
-                              position="relative"
-                              transition="all 0.2s"
-                            >
-                              <Box
-                                position="absolute"
-                                top="2px"
-                                left={agentMode ? "18px" : "2px"}
-                                width="16px"
-                                height="16px"
-                                borderRadius="full"
-                                bg="white"
-                                transition="all 0.2s"
-                                boxShadow="0 1px 2px rgba(0,0,0,0.2)"
-                              />
-                            </Box>
-                            <Text type="xs" secondary>
-                              {agentMode ? "Agent Mode" : "Task Mode"}
-                            </Text>
-                          </Flex>
-                        </Tooltip>
-                        <Button
-                          leftIcon={<Play size={16} />}
-                          rightIcon={<ArrowRight size={16} />}
-                          size="lg"
-                          height="48px"
-                          minWidth="200px"
-                          px={6}
-                          colorScheme="blue"
-                          fontWeight="500"
-                          fontSize="16px"
-                          letterSpacing="0.025em"
-                          _hover={{
-                            transform: "translateY(-1px)",
-                            boxShadow: "0 4px 12px rgba(66, 153, 225, 0.25)",
-                            '& svg:last-child': {
-                              transform: "translateX(2px)"
-                            }
-                          }}
-                          _active={{
-                            transform: "translateY(0)"
-                          }}
-                          _disabled={{
-                            bg: "gray.300",
-                            cursor: "not-allowed",
-                            opacity: 0.6
-                          }}
-                          transition="all 0.2s"
-                          borderRadius="8px"
-                          boxShadow="0 1px 3px rgba(0, 0, 0, 0.12)"
-                          onClick={async () => {
-                            if (selectedAutomationId) {
-                              const rolePrefix = selectedRole ? `[Role: ${selectedRole.name}]\n${selectedRole.content}\n\n` : '';
-                              const success = await playAutomation(selectedAutomationId, rolePrefix + additionalInstructions, agentMode);
-                              if (!success) {
-                                toast({
-                                  title: "Error",
-                                  description: "Failed to start task",
-                                  status: "error",
-                                  duration: 3000,
-                                  isClosable: true,
-                                });
-                              } else {
-                                const automation = automations.find(a => a.id === selectedAutomationId);
-                                const automationName = automation?.name || "Selected task";
-
-                                toast({
-                                  title: "Playback started",
-                                  description: `Playing "${automationName}"`,
-                                  status: "info",
-                                  duration: 3000,
-                                  isClosable: true,
-                                });
-                              }
-                            }
-                          }}
-                          isDisabled={isRecording || !selectedAutomationId}
-                        >
-                          Run Task
-                        </Button>
-                      </Flex>
-                    </RunButtonContainer>
-                  )}
-                </AutomationContent>
-              </MainContent>
-            )
+          ) : automationScript && isEditing ? (
+            // Script editor — ONLY when explicitly editing. Otherwise the chat
+            // view is the default (matches heelix). This is what was hiding the
+            // chat: previously this branch fired whenever a script was loaded.
+            <MainContent>
+              <AutomationHeader>
+                <Text type="l" bold>{automationScript.name}</Text>
+              </AutomationHeader>
+              <AutomationContent>
+                <AutomationScriptEditor
+                  script={automationScript}
+                  isEditing={isEditing}
+                  onSave={handleSaveAutomationScript}
+                  onCancel={() => setIsEditing(false)}
+                  onInstructionsChange={handleInstructionsChange}
+                  additionalInstructions={additionalInstructions}
+                />
+              </AutomationContent>
+            </MainContent>
           ) : (
-            // Default empty state — ChatView with no executionHeader. The
-            // input bar lives inside ChatView, so a fresh prompt routes
-            // through onSendPrompt → handleAIGenerate just like heelix.
+            // Default — ChatView is the home for everything else: empty state,
+            // active run, and post-run with executionHeader if a past run is
+            // selected from history.
             <ChatView
               messages={chatMessages.messages}
               isPlaying={isPlaying}
               isPlanning={isGeneratingAI}
               onSendPrompt={(text, agentModeFromInput) => {
-                handleAIGenerate(text, agentModeFromInput);
+                handlePromptSubmit(text, agentModeFromInput);
               }}
               onSendMessage={async (text) => {
                 chatMessages.addMessage(createMessage("user_prompt", "user", text));
@@ -1687,7 +1684,7 @@ export const AutomationScreen: FC = () => {
               }}
               onStop={handleStopPlayback}
               onContinue={(text) => {
-                handleAIGenerate(text, agentMode);
+                handlePromptSubmit(text, agentMode);
               }}
               onSubmitClarification={(response) => {
                 chatMessages.addMessage(createMessage("clarification_response", "user", response));
@@ -1700,6 +1697,21 @@ export const AutomationScreen: FC = () => {
                 chatMessages.updateLastMessageOfType("takeover_request", {
                   metadata: { completed: true } as any,
                 });
+              }}
+              onEdit={(automationId) => {
+                selectAutomation(automationId);
+                setTimeout(() => setIsEditing(true), 100);
+              }}
+              onSchedule={(automationId, executionRunId) => {
+                const name = (automations as any[]).find((a: any) => a.id === automationId)?.name || "";
+                setScheduleModal({ isOpen: true, automationId, automationName: name, executionRunId });
+              }}
+              onRerun={async (automationId) => {
+                selectAutomation(automationId);
+                setSelectedExecution(null);
+                chatMessages.clearMessages();
+                const rolePrefix = selectedRole ? `[Role: ${selectedRole.name}]\n${selectedRole.content}\n\n` : '';
+                setTimeout(() => playAutomation(automationId, rolePrefix, false), 300);
               }}
             />
           )}
@@ -1838,33 +1850,8 @@ export const AutomationScreen: FC = () => {
       <RecordingProcessingModal isOpen={isProcessingRecording} />
       
 
-      {/* AI Generation Modal */}
-      <Modal isOpen={isGeneratingAI} onClose={() => {}} isCentered closeOnOverlayClick={false}>
-        <ModalOverlay backdropFilter="blur(4px)" />
-        <ModalContent>
-          <ModalBody py={8}>
-            <VStack spacing={6}>
-              <Box>
-                <Spinner
-                  thickness="4px"
-                  speed="0.65s"
-                  emptyColor="gray.200"
-                  color="purple.500"
-                  size="xl"
-                />
-              </Box>
-              <VStack spacing={2}>
-                <Text type="l" bold>
-                  Getting Things Ready
-                </Text>
-                <Text type="s" secondary>
-                  {generationMessage}
-                </Text>
-              </VStack>
-            </VStack>
-          </ModalBody>
-        </ModalContent>
-      </Modal>
+      {/* AI Generation modal removed — ChatView's PlanningIndicator now
+          shows the "Thinking..." bubble inline while isGeneratingAI is true. */}
 
       <UpdateModal />
     </ScreenContainer>
