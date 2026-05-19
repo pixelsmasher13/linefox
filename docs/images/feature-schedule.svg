@@ -1,138 +1,118 @@
-<svg viewBox="0 0 1280 540" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Schedule and forget — automations run on a cron while you sleep">
+<svg viewBox="0 0 1280 600" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Linefox scheduler — daily, weekly, weekdays, or custom cron">
   <defs>
     <linearGradient id="bg-sc" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#FAFAFA"/>
-      <stop offset="100%" stop-color="#FFFFFF"/>
+      <stop offset="0%" stop-color="#F8FAFC"/>
+      <stop offset="100%" stop-color="#EEF2F7"/>
     </linearGradient>
-    <radialGradient id="amberGlow-sc" cx="15%" cy="20%" r="55%">
-      <stop offset="0%" stop-color="#F59E0B" stop-opacity="0.10"/>
-      <stop offset="100%" stop-color="#F59E0B" stop-opacity="0"/>
-    </radialGradient>
     <filter id="cardShadow-sc" x="-2%" y="-2%" width="104%" height="108%">
-      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#000000" flood-opacity="0.05"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#0F172A" flood-opacity="0.08"/>
     </filter>
   </defs>
 
-  <!-- Background -->
-  <rect width="1280" height="540" fill="url(#bg-sc)"/>
-  <rect width="1280" height="540" fill="url(#amberGlow-sc)"/>
+  <rect width="1280" height="600" fill="url(#bg-sc)"/>
 
-  <!-- Section label -->
-  <text x="80" y="70"
-        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
-        font-size="14"
-        font-weight="600"
-        fill="#3363AD"
-        letter-spacing="2">SCHEDULE &amp; FORGET</text>
-  <text x="80" y="108"
-        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
-        font-size="32"
-        font-weight="700"
-        fill="#18181B"
-        letter-spacing="-0.8">Recurring tasks while you sleep</text>
-  <text x="80" y="138"
-        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
-        font-size="15"
-        font-weight="400"
-        fill="#71717A">Save any automation as a script, then run it daily, weekly, or on a custom cron. Linefox handles it locally.</text>
-
-  <!-- Main card -->
+  <!-- App window -->
   <g filter="url(#cardShadow-sc)">
-    <rect x="80" y="180" width="1120" height="320" rx="14" ry="14" fill="#FFFFFF" stroke="#E4E4E7" stroke-width="1"/>
+    <rect x="40" y="40" width="1200" height="520" rx="12" fill="#FFFFFF" stroke="#E4E4E7" stroke-width="1"/>
   </g>
-  <line x1="80" y1="226" x2="1200" y2="226" stroke="#F4F4F5" stroke-width="1"/>
 
-  <!-- Header row -->
-  <g transform="translate(112, 207)">
-    <text x="0" y="4"
-          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
-          font-size="13"
-          font-weight="600"
-          fill="#27272A">Scheduled automations</text>
-    <text x="1056" y="4"
-          text-anchor="end"
-          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
-          font-size="13"
-          font-weight="500"
-          fill="#10B981">● 3 active</text>
+  <!-- Title bar -->
+  <rect x="40" y="40" width="1200" height="40" rx="12" fill="#F8FAFC"/>
+  <rect x="40" y="60" width="1200" height="20" fill="#F8FAFC"/>
+  <circle cx="68" cy="60" r="6" fill="#FF5F57"/>
+  <circle cx="88" cy="60" r="6" fill="#FEBC2E"/>
+  <circle cx="108" cy="60" r="6" fill="#28C840"/>
+  <text x="640" y="65" text-anchor="middle"
+        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+        font-size="13" font-weight="500" fill="#71717A">Linefox — Scheduled automations</text>
+  <line x1="40" y1="80" x2="1240" y2="80" stroke="#E4E4E7" stroke-width="1"/>
+
+  <!-- Status strip -->
+  <g transform="translate(72, 108)">
+    <text x="0" y="0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="11" font-weight="600" letter-spacing="0.6" fill="#A1A1AA">SCHEDULED AUTOMATIONS</text>
+    <text x="1100" y="0" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" font-weight="500" fill="#10B981">● 3 active</text>
   </g>
 
   <!-- Column headers -->
-  <g transform="translate(112, 250)">
+  <g transform="translate(72, 144)">
     <text x="0"   y="0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="11" font-weight="600" letter-spacing="0.6" fill="#A1A1AA">AUTOMATION</text>
     <text x="440" y="0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="11" font-weight="600" letter-spacing="0.6" fill="#A1A1AA">SCHEDULE</text>
     <text x="680" y="0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="11" font-weight="600" letter-spacing="0.6" fill="#A1A1AA">NEXT RUN</text>
     <text x="880" y="0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="11" font-weight="600" letter-spacing="0.6" fill="#A1A1AA">LAST RUN</text>
   </g>
-  <line x1="112" y1="262" x2="1168" y2="262" stroke="#F4F4F5" stroke-width="1"/>
+  <line x1="72" y1="156" x2="1208" y2="156" stroke="#F4F4F5" stroke-width="1"/>
 
   <!-- Row 1 -->
-  <g transform="translate(112, 296)">
-    <rect x="-12" y="-22" width="1080" height="50" rx="6" fill="transparent"/>
-    <!-- icon dot -->
-    <rect x="0" y="-12" width="22" height="22" rx="6" fill="#EFF6FF"/>
-    <text x="11" y="3" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="13">📊</text>
-    <text x="34" y="2" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="600" fill="#18181B">Morning portfolio digest</text>
-    <text x="34" y="20" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12" fill="#71717A">Yahoo Finance → Excel → Slack #investing</text>
+  <g transform="translate(72, 192)">
+    <rect x="0" y="-14" width="22" height="22" rx="6" fill="#EFF6FF"/>
+    <text x="11" y="2" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="13">📊</text>
+    <text x="34" y="0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="600" fill="#18181B">Morning portfolio digest</text>
+    <text x="34" y="18" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12" fill="#71717A">Yahoo Finance → Excel → Slack #investing</text>
 
-    <!-- Schedule badge -->
     <g transform="translate(440, -14)">
       <rect x="0" y="0" width="120" height="26" rx="13" fill="#F5F3FF" stroke="#DDD6FE" stroke-width="1"/>
       <text x="60" y="17" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12" font-weight="600" fill="#6D28D9">Weekdays · 07:00</text>
     </g>
 
-    <text x="680" y="6"  font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#27272A">Tomorrow · 07:00</text>
+    <text x="680" y="4"  font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#27272A">Tomorrow · 07:00</text>
     <text x="680" y="22" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#A1A1AA">in 14h 23m</text>
 
-    <text x="880" y="6"  font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#27272A">Today · 07:00</text>
-    <g transform="translate(880, 14)">
+    <text x="880" y="4"  font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#27272A">Today · 07:00</text>
+    <g transform="translate(880, 12)">
       <circle cx="5" cy="5" r="5" fill="#10B981"/>
       <polyline points="2.5,5 4.3,7 7.5,3.5" fill="none" stroke="#FFFFFF" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
       <text x="14" y="9" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="11" fill="#059669">succeeded · 47s</text>
     </g>
   </g>
-  <line x1="112" y1="340" x2="1168" y2="340" stroke="#F4F4F5" stroke-width="1"/>
+  <line x1="72" y1="236" x2="1208" y2="236" stroke="#F4F4F5" stroke-width="1"/>
 
   <!-- Row 2 -->
-  <g transform="translate(112, 374)">
-    <rect x="0" y="-12" width="22" height="22" rx="6" fill="#FEF3C7"/>
-    <text x="11" y="3" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="13">📨</text>
-    <text x="34" y="2" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="600" fill="#18181B">Reply to overnight Discord pings</text>
-    <text x="34" y="20" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12" fill="#71717A">Discord → drafts replies → my approval queue</text>
+  <g transform="translate(72, 272)">
+    <rect x="0" y="-14" width="22" height="22" rx="6" fill="#FEF3C7"/>
+    <text x="11" y="2" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="13">📨</text>
+    <text x="34" y="0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="600" fill="#18181B">Reply to overnight Discord pings</text>
+    <text x="34" y="18" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12" fill="#71717A">Discord → drafts replies → my approval queue</text>
 
     <g transform="translate(440, -14)">
       <rect x="0" y="0" width="100" height="26" rx="13" fill="#ECFDF5" stroke="#A7F3D0" stroke-width="1"/>
       <text x="50" y="17" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12" font-weight="600" fill="#047857">Every 4 hours</text>
     </g>
 
-    <text x="680" y="6"  font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#27272A">In 1h 47m</text>
-    <text x="880" y="6"  font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#27272A">2h ago</text>
-    <g transform="translate(880, 14)">
+    <text x="680" y="4"  font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#27272A">In 1h 47m</text>
+    <text x="880" y="4"  font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#27272A">2h ago</text>
+    <g transform="translate(880, 12)">
       <circle cx="5" cy="5" r="5" fill="#10B981"/>
       <polyline points="2.5,5 4.3,7 7.5,3.5" fill="none" stroke="#FFFFFF" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
       <text x="14" y="9" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="11" fill="#059669">4 drafts queued</text>
     </g>
   </g>
-  <line x1="112" y1="418" x2="1168" y2="418" stroke="#F4F4F5" stroke-width="1"/>
+  <line x1="72" y1="316" x2="1208" y2="316" stroke="#F4F4F5" stroke-width="1"/>
 
   <!-- Row 3 -->
-  <g transform="translate(112, 452)">
-    <rect x="0" y="-12" width="22" height="22" rx="6" fill="#FEE2E2"/>
-    <text x="11" y="3" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="13">🛒</text>
-    <text x="34" y="2" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="600" fill="#18181B">Track competitor pricing</text>
-    <text x="34" y="20" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12" fill="#71717A">Visit 6 product pages · log SKU + price → Sheet</text>
+  <g transform="translate(72, 352)">
+    <rect x="0" y="-14" width="22" height="22" rx="6" fill="#FEE2E2"/>
+    <text x="11" y="2" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="13">🛒</text>
+    <text x="34" y="0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="600" fill="#18181B">Track competitor pricing</text>
+    <text x="34" y="18" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12" fill="#71717A">Visit 6 product pages · log SKU + price → Sheet</text>
 
     <g transform="translate(440, -14)">
       <rect x="0" y="0" width="84" height="26" rx="13" fill="#EFF6FF" stroke="#BFDBFE" stroke-width="1"/>
       <text x="42" y="17" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12" font-weight="600" fill="#1D4ED8">Daily · 06:00</text>
     </g>
 
-    <text x="680" y="6"  font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#27272A">Tomorrow · 06:00</text>
-    <text x="880" y="6"  font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#27272A">Today · 06:00</text>
-    <g transform="translate(880, 14)">
+    <text x="680" y="4"  font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#27272A">Tomorrow · 06:00</text>
+    <text x="880" y="4"  font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#27272A">Today · 06:00</text>
+    <g transform="translate(880, 12)">
       <circle cx="5" cy="5" r="5" fill="#10B981"/>
       <polyline points="2.5,5 4.3,7 7.5,3.5" fill="none" stroke="#FFFFFF" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
       <text x="14" y="9" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="11" fill="#059669">6/6 pages · 1m 12s</text>
     </g>
+  </g>
+  <line x1="72" y1="396" x2="1208" y2="396" stroke="#F4F4F5" stroke-width="1"/>
+
+  <!-- Add row hint -->
+  <g transform="translate(72, 444)">
+    <rect x="-8" y="-22" width="1136" height="44" rx="8" fill="#F9FAFB" stroke="#E4E4E7" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="560" y="6" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#71717A">＋ Schedule a task — daily, weekly, weekdays, or custom interval</text>
   </g>
 </svg>

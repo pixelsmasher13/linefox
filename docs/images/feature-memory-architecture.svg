@@ -1,249 +1,173 @@
-<svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Memory architecture — three bounded streams feed the agent, not a growing thread of observations">
+<svg viewBox="0 0 1280 600" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Three bounded streams feed the agent each turn — Memory, Current State, Recent Actions">
   <defs>
     <linearGradient id="bg-ma" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#FAFAFA"/>
-      <stop offset="100%" stop-color="#FFFFFF"/>
+      <stop offset="0%" stop-color="#F8FAFC"/>
+      <stop offset="100%" stop-color="#EEF2F7"/>
     </linearGradient>
-    <radialGradient id="blueGlow-ma" cx="50%" cy="40%" r="60%">
-      <stop offset="0%" stop-color="#3363AD" stop-opacity="0.06"/>
-      <stop offset="100%" stop-color="#3363AD" stop-opacity="0"/>
-    </radialGradient>
     <filter id="cardShadow-ma" x="-2%" y="-2%" width="104%" height="108%">
-      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#000000" flood-opacity="0.05"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#0F172A" flood-opacity="0.08"/>
     </filter>
-    <!-- Reusable stream-box pill -->
-    <marker id="arrowHead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <marker id="arrowHead-ma" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#3363AD"/>
     </marker>
   </defs>
 
-  <!-- Background -->
-  <rect width="1280" height="720" fill="url(#bg-ma)"/>
-  <rect width="1280" height="720" fill="url(#blueGlow-ma)"/>
+  <rect width="1280" height="600" fill="url(#bg-ma)"/>
 
-  <!-- Section label -->
-  <text x="80" y="70"
-        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
-        font-size="14"
-        font-weight="600"
-        fill="#3363AD"
-        letter-spacing="2">MEMORY ARCHITECTURE</text>
-  <text x="80" y="108"
-        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
-        font-size="32"
-        font-weight="700"
-        fill="#18181B"
-        letter-spacing="-0.8">State-driven, not history-driven</text>
-  <text x="80" y="138"
-        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
-        font-size="15"
-        font-weight="400"
-        fill="#71717A">Three bounded streams feed the agent each turn — never the full thread of past observations.</text>
-
-  <!-- Main card -->
+  <!-- Outer card -->
   <g filter="url(#cardShadow-ma)">
-    <rect x="80" y="180" width="1120" height="500" rx="14" ry="14" fill="#FFFFFF" stroke="#E4E4E7" stroke-width="1"/>
+    <rect x="40" y="40" width="1200" height="520" rx="14" fill="#FFFFFF" stroke="#E4E4E7" stroke-width="1"/>
   </g>
 
-  <!-- ===== Stream box 1: MEMORY ===== -->
-  <g transform="translate(120, 212)">
-    <rect x="0" y="0" width="320" height="184" rx="10" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
-    <!-- Header strip -->
-    <rect x="0" y="0" width="320" height="36" rx="10" fill="#EFF6FF"/>
-    <rect x="0" y="26" width="320" height="10" fill="#EFF6FF"/>
-    <text x="20" y="23"
-          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
-          font-size="13"
-          font-weight="700"
-          fill="#1E3A8A"
-          letter-spacing="0.8">MEMORY</text>
-    <text x="300" y="23" text-anchor="end"
+  <!-- ===== Three stream boxes ===== -->
+  <!-- MEMORY -->
+  <g transform="translate(80, 76)">
+    <rect x="0" y="0" width="360" height="200" rx="10" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+    <rect x="0" y="0" width="360" height="40" rx="10" fill="#EFF6FF"/>
+    <rect x="0" y="28" width="360" height="12" fill="#EFF6FF"/>
+    <text x="20" y="25"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+          font-size="13" font-weight="700" fill="#1E3A8A" letter-spacing="0.8">MEMORY</text>
+    <text x="340" y="25" text-anchor="end"
           font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
-          font-size="11"
-          fill="#3B82F6">~1–3k tok</text>
+          font-size="11" fill="#3B82F6">~1–3k tok</text>
 
-    <!-- Subtitle -->
-    <text x="20" y="58"
-          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
-          font-size="12"
-          font-weight="500"
-          fill="#475569">What the agent chose to remember</text>
+    <text x="20" y="62"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+          font-size="12" font-weight="500" fill="#475569">What the agent chose to remember</text>
 
-    <!-- Bulleted items -->
-    <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12" fill="#334155">
-      <text x="20" y="84">• Tesla automotive Q4: $77.07B</text>
-      <text x="20" y="104">• Energy segment: $10.09B</text>
-      <text x="20" y="124">• Services: $10.53B (verified)</text>
-      <text x="20" y="144">• 10-K filing URL saved</text>
+    <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif" font-size="12" fill="#334155">
+      <text x="20" y="90">• Tesla automotive Q4: $77.07B</text>
+      <text x="20" y="112">• Energy segment: $10.09B</text>
+      <text x="20" y="134">• Services: $10.53B (verified)</text>
+      <text x="20" y="156">• 10-K filing URL saved</text>
     </g>
-    <text x="20" y="170"
-          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
-          font-size="11" font-style="italic"
-          fill="#94A3B8">LLM-curated · written via MEMORY_SAVE</text>
+    <text x="20" y="184"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+          font-size="11" font-style="italic" fill="#94A3B8">LLM-curated · written via MEMORY_SAVE</text>
   </g>
 
-  <!-- ===== Stream box 2: CURRENT STATE ===== -->
-  <g transform="translate(480, 212)">
-    <rect x="0" y="0" width="320" height="184" rx="10" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
-    <rect x="0" y="0" width="320" height="36" rx="10" fill="#ECFDF5"/>
-    <rect x="0" y="26" width="320" height="10" fill="#ECFDF5"/>
-    <text x="20" y="23"
-          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
-          font-size="13"
-          font-weight="700"
-          fill="#065F46"
-          letter-spacing="0.8">CURRENT STATE</text>
-    <text x="300" y="23" text-anchor="end"
+  <!-- CURRENT STATE -->
+  <g transform="translate(460, 76)">
+    <rect x="0" y="0" width="360" height="200" rx="10" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+    <rect x="0" y="0" width="360" height="40" rx="10" fill="#ECFDF5"/>
+    <rect x="0" y="28" width="360" height="12" fill="#ECFDF5"/>
+    <text x="20" y="25"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+          font-size="13" font-weight="700" fill="#065F46" letter-spacing="0.8">CURRENT STATE</text>
+    <text x="340" y="25" text-anchor="end"
           font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
-          font-size="11"
-          fill="#10B981">~2–5k tok</text>
+          font-size="11" fill="#10B981">~2–5k tok</text>
 
-    <text x="20" y="58"
-          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
-          font-size="12"
-          font-weight="500"
-          fill="#475569">A live snapshot of the world right now</text>
+    <text x="20" y="62"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+          font-size="12" font-weight="500" fill="#475569">A live snapshot of the world right now</text>
 
-    <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12" fill="#334155">
-      <text x="20" y="84">• App: Microsoft Excel</text>
-      <text x="20" y="104">• Active sheet: Q4-2024-actuals</text>
-      <text x="20" y="124">• Used range: A1:H50</text>
-      <text x="20" y="144">• 47 actionable elements visible</text>
+    <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif" font-size="12" fill="#334155">
+      <text x="20" y="90">• App: Microsoft Excel</text>
+      <text x="20" y="112">• Active sheet: Q4-2024-actuals</text>
+      <text x="20" y="134">• Used range: A1:H50</text>
+      <text x="20" y="156">• 47 actionable elements visible</text>
     </g>
-    <text x="20" y="170"
-          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
-          font-size="11" font-style="italic"
-          fill="#94A3B8">Replaced wholesale every turn</text>
+    <text x="20" y="184"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+          font-size="11" font-style="italic" fill="#94A3B8">Replaced wholesale every turn</text>
   </g>
 
-  <!-- ===== Stream box 3: RECENT ACTIONS ===== -->
-  <g transform="translate(840, 212)">
-    <rect x="0" y="0" width="320" height="184" rx="10" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
-    <rect x="0" y="0" width="320" height="36" rx="10" fill="#FEF3C7"/>
-    <rect x="0" y="26" width="320" height="10" fill="#FEF3C7"/>
-    <text x="20" y="23"
-          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
-          font-size="13"
-          font-weight="700"
-          fill="#92400E"
-          letter-spacing="0.8">RECENT ACTIONS</text>
-    <text x="300" y="23" text-anchor="end"
+  <!-- RECENT ACTIONS -->
+  <g transform="translate(840, 76)">
+    <rect x="0" y="0" width="360" height="200" rx="10" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+    <rect x="0" y="0" width="360" height="40" rx="10" fill="#FEF3C7"/>
+    <rect x="0" y="28" width="360" height="12" fill="#FEF3C7"/>
+    <text x="20" y="25"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+          font-size="13" font-weight="700" fill="#92400E" letter-spacing="0.8">RECENT ACTIONS</text>
+    <text x="340" y="25" text-anchor="end"
           font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
-          font-size="11"
-          fill="#D97706">~1–2k tok</text>
+          font-size="11" fill="#D97706">~1–2k tok</text>
 
-    <text x="20" y="58"
-          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
-          font-size="12"
-          font-weight="500"
-          fill="#475569">Sliding window · auto-compressed</text>
+    <text x="20" y="62"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+          font-size="12" font-weight="500" fill="#475569">Sliding window · auto-compressed</text>
 
     <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#334155">
-      <text x="20" y="84">GOOGLE_SEARCH ✓ "Tesla 10-K"</text>
-      <text x="20" y="102">FETCH_PAGES ✓ sec.gov/.../tsla</text>
-      <text x="20" y="120">MEMORY_SAVE ✓ 3 segment figures</text>
-      <text x="20" y="138" fill="#94A3B8" font-style="italic">[47 older actions: summarized]</text>
+      <text x="20" y="90">GOOGLE_SEARCH ✓ "Tesla 10-K"</text>
+      <text x="20" y="110">FETCH_PAGES ✓ sec.gov/.../tsla</text>
+      <text x="20" y="130">MEMORY_SAVE ✓ 3 segment figures</text>
+      <text x="20" y="150" fill="#94A3B8" font-style="italic">[47 older actions: summarized]</text>
     </g>
-    <text x="20" y="170"
-          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
-          font-size="11" font-style="italic"
-          fill="#94A3B8">Old entries compressed, never dropped</text>
+    <text x="20" y="184"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+          font-size="11" font-style="italic" fill="#94A3B8">Old entries compressed, never dropped</text>
   </g>
 
-  <!-- ===== Cached prompt (background) ===== -->
-  <g transform="translate(120, 416)">
-    <rect x="0" y="0" width="1040" height="36" rx="8" fill="#FAFAFA" stroke="#E4E4E7" stroke-width="1" stroke-dasharray="4 3"/>
-    <text x="20" y="22"
-          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
-          font-size="12"
-          font-weight="600"
-          fill="#52525B">+ SYSTEM PROMPT</text>
-    <text x="160" y="22"
-          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
-          font-size="12"
-          fill="#71717A">skills, command grammar, app-specific commands · ~10–20k tokens · </text>
-    <text x="700" y="22"
-          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
-          font-size="12"
-          font-weight="600"
-          fill="#3363AD">cached at ~10% via cache_control: ephemeral</text>
-    <text x="1020" y="22" text-anchor="end"
+  <!-- System prompt strip -->
+  <g transform="translate(80, 296)">
+    <rect x="0" y="0" width="1120" height="40" rx="8" fill="#FAFAFA" stroke="#E4E4E7" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="20" y="25"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+          font-size="12" font-weight="600" fill="#52525B">+ SYSTEM PROMPT</text>
+    <text x="160" y="25"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+          font-size="12" fill="#71717A">skills, command grammar, app-specific commands · ~10–20k tokens ·</text>
+    <text x="660" y="25"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+          font-size="12" font-weight="600" fill="#3363AD">cached at ~10% via cache_control: ephemeral</text>
+    <text x="1100" y="25" text-anchor="end"
           font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
-          font-size="11"
-          fill="#71717A">flat each turn</text>
+          font-size="11" fill="#71717A">flat each turn</text>
   </g>
 
-  <!-- ===== Arrows converging to agent ===== -->
-  <!-- Left → center -->
-  <path d="M 280 396 Q 280 466 600 478" fill="none" stroke="#3363AD" stroke-width="1.5" opacity="0.5"/>
-  <!-- Center → center (straight) -->
-  <path d="M 640 452 L 640 478" fill="none" stroke="#3363AD" stroke-width="1.5" opacity="0.5"/>
-  <!-- Right → center -->
-  <path d="M 1000 396 Q 1000 466 680 478" fill="none" stroke="#3363AD" stroke-width="1.5" opacity="0.5"/>
+  <!-- Arrows from each stream box bottom (y=276 absolute) to agent (y=360) -->
+  <path d="M 260 276 Q 260 340 600 360" fill="none" stroke="#3363AD" stroke-width="1.5" opacity="0.5"/>
+  <path d="M 640 276 L 640 360" fill="none" stroke="#3363AD" stroke-width="1.5" opacity="0.5"/>
+  <path d="M 1020 276 Q 1020 340 680 360" fill="none" stroke="#3363AD" stroke-width="1.5" opacity="0.5"/>
 
   <!-- AGENT pill -->
-  <g transform="translate(540, 478)">
+  <g transform="translate(540, 360)">
     <rect x="0" y="0" width="200" height="46" rx="23" fill="#3363AD"/>
-    <text x="100" y="29"
-          text-anchor="middle"
-          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
-          font-size="16"
-          font-weight="700"
-          fill="#FFFFFF"
-          letter-spacing="0.5">AGENT</text>
+    <text x="100" y="29" text-anchor="middle"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+          font-size="16" font-weight="700" fill="#FFFFFF" letter-spacing="0.5">AGENT</text>
   </g>
 
-  <!-- Down arrow from agent -->
-  <line x1="640" y1="524" x2="640" y2="556" stroke="#3363AD" stroke-width="1.5" marker-end="url(#arrowHead)"/>
+  <!-- Down arrow -->
+  <line x1="640" y1="406" x2="640" y2="436" stroke="#3363AD" stroke-width="1.5" marker-end="url(#arrowHead-ma)"/>
 
-  <!-- Output: one command -->
-  <g transform="translate(440, 562)">
+  <!-- One command output -->
+  <g transform="translate(440, 442)">
     <rect x="0" y="0" width="400" height="40" rx="8" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1"/>
-    <text x="200" y="25"
-          text-anchor="middle"
+    <text x="200" y="25" text-anchor="middle"
           font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
-          font-size="13"
-          font-weight="600"
-          fill="#166534">EXCEL_TYPE:B3:=77073  ||  one command per turn</text>
+          font-size="13" font-weight="600" fill="#166534">EXCEL_TYPE:... ||  one command per turn</text>
   </g>
 
-  <!-- Bottom stat strip: token comparison -->
-  <line x1="120" y1="632" x2="1160" y2="632" stroke="#E4E4E7" stroke-width="1"/>
-  <text x="120" y="660"
-        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
-        font-size="12"
-        font-weight="700"
-        fill="#52525B"
-        letter-spacing="0.6">PER-TURN BILLED TOKENS (with prefix caching)</text>
+  <!-- Bottom stat strip -->
+  <line x1="80" y1="508" x2="1200" y2="508" stroke="#E4E4E7" stroke-width="1"/>
+  <text x="80" y="534"
+        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+        font-size="11" font-weight="700" fill="#52525B" letter-spacing="0.6">PER-TURN BILLED TOKENS (with prefix caching)</text>
 
-  <!-- Tiny inline mini-table -->
-  <g transform="translate(120, 670)" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12">
-    <!-- Header row -->
+  <g transform="translate(80, 546)" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif" font-size="12">
     <text x="0"   y="0" fill="#A1A1AA" font-weight="600">STEP</text>
-    <text x="120" y="0" fill="#3363AD" font-weight="700">LINEFOX</text>
-    <text x="280" y="0" fill="#A1A1AA" font-weight="600">NAIVE ReAct (cumulative thread)</text>
+    <text x="100" y="0" fill="#3363AD" font-weight="700">LINEFOX</text>
+    <text x="260" y="0" fill="#A1A1AA" font-weight="600">NAIVE ReAct (cumulative thread)</text>
 
-    <!-- Rows -->
-    <text x="0"   y="22" fill="#71717A">1</text>
-    <text x="120" y="22" fill="#27272A" font-weight="600">~3k</text>
-    <text x="280" y="22" fill="#27272A">~5k</text>
-
-    <text x="0"   y="42" fill="#71717A">10</text>
-    <text x="120" y="42" fill="#27272A" font-weight="600">~3k</text>
-    <text x="280" y="42" fill="#DC2626">~35k <tspan fill="#A1A1AA">(11×)</tspan></text>
+    <text x="0"   y="-2" fill="#71717A"/>
   </g>
+  <g transform="translate(80, 568)" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif" font-size="12">
+    <text x="0"   y="0" fill="#71717A">1</text>
+    <text x="100" y="0" fill="#27272A" font-weight="600">~3k</text>
+    <text x="260" y="0" fill="#27272A">~5k</text>
 
-  <!-- Right-side callout -->
-  <g transform="translate(820, 670)">
-    <text x="0" y="0"
-          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
-          font-size="13"
-          font-weight="700"
-          fill="#27272A">Step 30: ~3k vs ~95k</text>
-    <text x="0" y="20"
-          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
-          font-size="12"
-          fill="#71717A">Linefox cost stays flat — the dynamic payload is bounded.</text>
+    <text x="500" y="0" fill="#27272A" font-weight="700">Step 10:</text>
+    <text x="560" y="0" fill="#27272A" font-weight="600">~3k</text>
+    <text x="610" y="0" fill="#71717A">vs</text>
+    <text x="640" y="0" fill="#DC2626">~35k (11×)</text>
+
+    <text x="820" y="0" fill="#27272A" font-weight="700">Step 30:</text>
+    <text x="880" y="0" fill="#27272A" font-weight="600">~3k</text>
+    <text x="930" y="0" fill="#71717A">vs</text>
+    <text x="960" y="0" fill="#DC2626">~95k (32×)</text>
   </g>
-
 </svg>

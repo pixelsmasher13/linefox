@@ -24,17 +24,33 @@ Everything runs locally. Your API keys, your data, your machine.
 
 ## Features at a glance
 
-<p align="center">
-  <img src="docs/images/feature-task-chat.svg" alt="Describe a task in plain English — Linefox plans the steps and runs them across your real apps" width="100%"/>
-</p>
+### Plain English in, real work out
+
+Tell Linefox what you want. It plans the steps, drives your real browser and apps, and reports back inline.
 
 <p align="center">
-  <img src="docs/images/feature-schedule.svg" alt="Schedule and forget — automations run on a cron while you sleep" width="100%"/>
+  <img src="docs/images/feature-task-chat.svg" alt="Linefox executing a deploy task — chat thread with terminal steps, URL verification, and live status" width="100%"/>
 </p>
 
+### Two-tier planning for long tasks
+
+The orchestrator breaks the goal into phases. The executor runs each phase step-by-step and calls back when it's done or stuck.
+
 <p align="center">
-  <img src="docs/images/feature-remote-control.svg" alt="Run from Telegram or Discord — trigger and monitor automations from your phone" width="100%"/>
+  <img src="docs/images/feature-planner.svg" alt="Linefox orchestrator phase plan — 3 phases of a research task, with the executor running steps under phase 1" width="100%"/>
 </p>
+
+### Schedule and forget
+
+Save any automation as a script, then run it daily, weekly, weekdays, or on a custom cron. Linefox handles it locally — your desktop runs the work in the background.
+
+<p align="center">
+  <img src="docs/images/feature-schedule.svg" alt="Scheduled automations table — morning digest, Discord ping replies, competitor pricing — each with schedule, next run, last run status" width="100%"/>
+</p>
+
+### Run from Telegram or Discord
+
+Pair a Telegram or Discord bot and trigger automations from your phone. Your desktop does the work, the bot relays the brief and the result. Both engines ship in the box — just paste a bot token in Settings.
 
 ## Memory architecture
 
