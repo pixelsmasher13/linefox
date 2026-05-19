@@ -5,8 +5,10 @@ use serde_json;
 use std::time::Duration;
 
 fn gemini_url() -> String {
-    let model = crate::engine::provider_config::get_model("gemini");
-    format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", model)
+    format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+        crate::engine::provider_config::get_model("gemini")
+    )
 }
 
 #[derive(Serialize)]
@@ -153,7 +155,7 @@ pub async fn call_llm_api_with_session(
             .map_err(|e| {
                 error!("Failed to parse Gemini response as JSON: {}", e);
                 error!("Response was: {}", if response_text.len() > 500 { 
-                    format!("{}...", &response_text[..500]) 
+                    format!("{}...", crate::engine::types::safe_truncate(&response_text, 500)) 
                 } else { 
                     response_text.clone() 
                 });
@@ -204,6 +206,7 @@ pub async fn call_llm_api_with_session(
         // Update session token counts
         session.total_input_tokens += input_tokens;
         session.total_output_tokens += output_tokens;
+        session.api_calls += 1;
         
         // Add assistant response to session history
         session.add_assistant_response(assistant_response.clone());
@@ -283,7 +286,7 @@ pub async fn call_llm_api(
             .map_err(|e| {
                 error!("Failed to parse Gemini response as JSON: {}", e);
                 error!("Response was: {}", if response_text.len() > 500 { 
-                    format!("{}...", &response_text[..500]) 
+                    format!("{}...", crate::engine::types::safe_truncate(&response_text, 500)) 
                 } else { 
                     response_text.clone() 
                 });
@@ -328,7 +331,16 @@ pub async fn call_llm_api(
             warn!("Gemini API returned empty text response");
             return Err("Gemini API returned empty text - may need to retry".to_string());
         }
-        
+
+        // Fold into active LLM_SESSION (or standalone tally if none).
+        crate::engine::usage_tracker::record_stateless_call(
+            "gemini",
+            input_tokens,
+            output_tokens,
+            0,
+            0,
+        );
+
         Ok((response_text, input_tokens, output_tokens))
     } else {
         let error_message = response

@@ -1,6 +1,19 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Safely truncate a string to at most `max_bytes`, rounding down to a char boundary.
+/// Use this instead of `&s[..N]` which panics on multi-byte UTF-8 characters.
+pub fn safe_truncate(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 // ===== EXECUTION STATE =====
 
 /// Simple execution state for tracking automation progress
@@ -45,6 +58,9 @@ pub enum ActionType {
     TerminalKill,      // Kill a background process
     TerminalRead,      // Read output from a process
     GoogleSearch,      // Quick Google search acceleration (opens Chrome, navigates to results)
+    FetchPages,        // Fetch and extract readable text from URLs without browser
+    WriteFile,         // Write content directly to a file (bypasses shell escaping)
+    BrowserConsole,    // Fetch console errors from Chrome via DevTools Protocol
 }
 
 /// An action decided by the agent
@@ -77,6 +93,9 @@ pub struct AppState {
     /// Word document info (cursor position + paragraph structure) — auto-fetched when Word is active
     #[serde(default)]
     pub word_document_info: Option<String>,
+    /// Excel sheet info (active sheet, all sheets, used range) — auto-fetched when Excel is active
+    #[serde(default)]
+    pub excel_sheet_info: Option<String>,
     pub recent_actions: Vec<EnhancedAction>,
     /// Raw element tree for LLM context
     pub element_tree: Option<String>,
@@ -202,6 +221,12 @@ pub struct LLMSession {
     pub messages: Vec<Message>,
     pub total_input_tokens: u32,
     pub total_output_tokens: u32,
+    /// Cumulative cached input tokens read by Anthropic prefix cache.
+    pub cache_read_tokens: u32,
+    /// Cumulative input tokens written to the Anthropic prefix cache.
+    pub cache_creation_tokens: u32,
+    /// Total LLM API calls made in this session (session + stateless folded in).
+    pub api_calls: u32,
     pub consecutive_parse_errors: u32,
 }
 
@@ -223,6 +248,9 @@ impl LLMSession {
             messages,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            api_calls: 0,
             consecutive_parse_errors: 0,
         }
     }

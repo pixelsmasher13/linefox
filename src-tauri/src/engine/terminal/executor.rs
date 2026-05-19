@@ -8,6 +8,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::{RwLock, oneshot};
 use once_cell::sync::Lazy;
 use tauri::Emitter;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
 use super::permissions::{
     ApprovalDecision, ApprovalRequest, ResolvedCommand,
@@ -16,12 +18,15 @@ use super::permissions::{
 use super::claude_cli_parser::{
     ClaudeStreamState, ClaudeStreamOutput, ClaudeOutputType,
     is_claude_cli_command, parse_claude_jsonl_line, is_claude_jsonl,
+    extract_session_id_from_jsonl,
 };
 
-// Track whether a Claude CLI session has been started in this execution.
-// When true, subsequent Claude CLI commands will auto-get --continue if missing.
-static CLAUDE_CLI_SESSION_ACTIVE: Lazy<Arc<std::sync::Mutex<bool>>> =
-    Lazy::new(|| Arc::new(std::sync::Mutex::new(false)));
+// Track the Claude CLI session ID started in this automation run.
+// When set, subsequent Claude CLI commands use --resume <id> instead of the bare
+// --continue flag, ensuring we always resume the exact session from this run rather
+// than whatever was the most-recently-used global session in ~/.claude/.
+static CLAUDE_CLI_SESSION_ID: Lazy<Arc<std::sync::Mutex<Option<String>>>> =
+    Lazy::new(|| Arc::new(std::sync::Mutex::new(None)));
 
 // Track the last working directory used by a terminal command.
 // Persists across commands so subsequent TERMINAL_RUN calls inherit the CWD
@@ -29,18 +34,20 @@ static CLAUDE_CLI_SESSION_ACTIVE: Lazy<Arc<std::sync::Mutex<bool>>> =
 static LAST_TERMINAL_CWD: Lazy<Arc<std::sync::Mutex<Option<String>>>> =
     Lazy::new(|| Arc::new(std::sync::Mutex::new(None)));
 
-/// Mark that a Claude CLI session has been started (call after successful Claude CLI execution)
-fn mark_claude_cli_session_active() {
-    if let Ok(mut active) = CLAUDE_CLI_SESSION_ACTIVE.lock() {
-        *active = true;
-        info!("Claude CLI session marked active (--continue will be auto-added to subsequent calls)");
+/// Store the Claude CLI session ID so subsequent calls can resume the exact session.
+fn mark_claude_cli_session_active(session_id: Option<String>) {
+    if let Ok(mut id) = CLAUDE_CLI_SESSION_ID.lock() {
+        if let Some(ref sid) = session_id {
+            info!("Claude CLI session id {} stored (--resume will be used for subsequent calls)", sid);
+        }
+        *id = session_id;
     }
 }
 
 /// Reset Claude CLI session tracking (call when automation starts fresh)
 pub fn reset_claude_cli_session() {
-    if let Ok(mut active) = CLAUDE_CLI_SESSION_ACTIVE.lock() {
-        *active = false;
+    if let Ok(mut id) = CLAUDE_CLI_SESSION_ID.lock() {
+        *id = None;
     }
 }
 
@@ -51,17 +58,43 @@ pub fn reset_terminal_state() {
     }
 }
 
-/// Check if a Claude CLI session is currently active
-fn is_claude_cli_session_active() -> bool {
-    CLAUDE_CLI_SESSION_ACTIVE.lock().map(|a| *a).unwrap_or(false)
+/// Return the active Claude CLI session ID, if any
+fn get_claude_cli_session_id() -> Option<String> {
+    CLAUDE_CLI_SESSION_ID.lock().ok().and_then(|id| id.clone())
 }
 
 /// Ensure Claude CLI command has the required flags for JSONL streaming output.
-/// Also auto-adds --continue if a Claude CLI session is already active and the
-/// command doesn't explicitly have --continue (prevents accidental session loss).
+/// Also replaces any bare `--continue` with `--resume <session_id>` when a
+/// session ID was captured from a previous run in this automation, and auto-adds
+/// `--resume <id>` when the command omits it entirely.  Using a specific session
+/// ID rather than the global `--continue` prevents accidentally latching on to
+/// whatever other Claude CLI conversation ran last on the machine.
 fn ensure_claude_cli_streaming_flags(command: &str) -> String {
     let cmd = command.trim();
-    
+
+    // For compound commands (&&, ;, ||), split and only modify the claude sub-command.
+    // This prevents injecting flags into e.g. `cd` when the LLM writes `cd ~/path && claude ...`
+    for separator in &[" && ", " || ", "; "] {
+        if let Some(pos) = cmd.find(separator) {
+            let before = &cmd[..pos];
+            let after = &cmd[pos + separator.len()..];
+            if after.trim().starts_with("claude ") || after.trim() == "claude" {
+                let modified = ensure_claude_cli_streaming_flags(after);
+                return format!("{}{}{}", before, separator, modified);
+            } else if before.trim().starts_with("claude ") || before.trim() == "claude" {
+                let modified = ensure_claude_cli_streaming_flags(before);
+                return format!("{}{}{}", modified, separator, after);
+            }
+            // Neither part starts with claude — return as-is
+            return cmd.to_string();
+        }
+    }
+
+    // Single command (no compound operators) — verify it's actually a claude command
+    if !cmd.starts_with("claude ") && !cmd.starts_with("claude\t") && cmd != "claude" {
+        return cmd.to_string();
+    }
+
     // If it already has --print and --output-format, leave it alone (only add --continue if needed)
     let mut result = if cmd.contains("--print") && cmd.contains("--output-format") {
         cmd.to_string()
@@ -69,32 +102,32 @@ fn ensure_claude_cli_streaming_flags(command: &str) -> String {
         // Parse the command to insert flags appropriately
         // Claude CLI format: claude [options] [prompt]
         let parts: Vec<&str> = cmd.splitn(2, char::is_whitespace).collect();
-        
+
         if parts.is_empty() {
             return cmd.to_string();
         }
-        
+
         let claude_cmd = parts[0]; // "claude"
         let rest = parts.get(1).unwrap_or(&"");
-        
+
         // Build the flags we need
         let mut flags = Vec::new();
-        
+
         // Add --print if not present
         if !cmd.contains("--print") && !cmd.contains("-p ") && !cmd.contains("-p\t") {
             flags.push("--print");
         }
-        
+
         // Add --output-format stream-json if not present
         if !cmd.contains("--output-format") {
             flags.push("--output-format");
             flags.push("stream-json");
         }
-        
+
         // Add --permission-mode bypassPermissions if not present so Claude CLI can operate
-        // autonomously in headless (-p) mode. Without this, Claude CLI blocks on bash
-        // commands since it can't prompt interactively. Linefox already gates commands
-        // through its own terminal permission layer.
+        // autonomously in headless (-p) mode. acceptEdits only allows file edits but blocks
+        // bash — Claude can't run tests, install deps, or build. Linefox already gates
+        // commands through its own permission layer, so double-gating just causes silent failures.
         if !cmd.contains("--permission-mode") {
             flags.push("--permission-mode");
             flags.push("bypassPermissions");
@@ -109,32 +142,118 @@ fn ensure_claude_cli_streaming_flags(command: &str) -> String {
         if !cmd.contains("--include-partial-messages") {
             flags.push("--include-partial-messages");
         }
-        
+
         // Reconstruct the command
         if rest.is_empty() {
             format!("{} {}", claude_cmd, flags.join(" "))
         } else {
-            // Check if rest starts with options or a prompt
-            if rest.starts_with('-') || rest.starts_with("--") {
-                format!("{} {} {}", claude_cmd, flags.join(" "), rest)
-            } else {
-                format!("{} {} {}", claude_cmd, flags.join(" "), rest)
-            }
+            format!("{} {} {}", claude_cmd, flags.join(" "), rest)
         }
     };
-    
-    // Auto-add --continue if a Claude CLI session is already active and command doesn't have it.
-    // This prevents the LLM from accidentally starting a new session when it forgets --continue.
-    if !result.contains("--continue") && is_claude_cli_session_active() {
-        info!("Auto-adding --continue to Claude CLI command (session already active)");
-        // Insert --continue right after "claude"
-        if let Some(pos) = result.find("claude") {
-            let insert_pos = pos + "claude".len();
-            result.insert_str(insert_pos, " --continue");
+
+    // Fix quoting for the -p prompt argument. LLMs often generate double-quoted prompts
+    // containing inner double quotes (e.g. claude -p "text with "nested" quotes") which
+    // breaks zsh. Re-wrap the prompt in single quotes to be shell-safe.
+    result = fix_claude_prompt_quoting(&result);
+
+    // If we have a session ID from a previous run in this automation, ensure the command
+    // resumes that exact session.  We do two things:
+    //   1. Replace a bare --continue (global "last session") with --resume <id> (pinned).
+    //   2. Auto-add --resume <id> when the command doesn't mention either flag.
+    // This prevents the common failure where --continue accidentally latches onto a
+    // different Claude CLI conversation that ran more recently on the same machine.
+    if let Some(session_id) = get_claude_cli_session_id() {
+        let resume_flag = format!("--resume {}", session_id);
+        if result.contains("--continue") {
+            // Swap the imprecise global flag for the pinned one.
+            info!("Replacing --continue with --resume {} in Claude CLI command", session_id);
+            result = result.replace("--continue", &resume_flag);
+        } else if !result.contains("--resume") {
+            // Auto-add when the command omits any continuation flag.
+            info!("Auto-adding --resume {} to Claude CLI command (session active)", session_id);
+            if let Some(pos) = result.find("claude") {
+                let insert_pos = pos + "claude".len();
+                result.insert_str(insert_pos, &format!(" {}", resume_flag));
+            }
         }
     }
-    
+
     result
+}
+
+/// Fix quoting on the -p prompt in a Claude CLI command.
+/// LLMs often produce `claude -p "text with "nested" quotes"` which is invalid shell.
+/// This detects the prompt portion, strips its outer quotes, and re-wraps safely.
+/// On Unix: uses single quotes (POSIX-safe).
+/// On Windows: keeps double quotes but escapes inner quotes with backslash.
+fn fix_claude_prompt_quoting(cmd: &str) -> String {
+    // Find the -p flag followed by a quoted prompt
+    let prompt_markers = [" -p \"", " -p '", " --print \"", " --print '"];
+
+    let (prefix_end, quote_char) = {
+        let mut found = None;
+        for marker in &prompt_markers {
+            if let Some(pos) = cmd.find(marker) {
+                let q = if marker.ends_with('"') { '"' } else { '\'' };
+                // prefix_end points to the opening quote
+                found = Some((pos + marker.len() - 1, q));
+                break;
+            }
+        }
+        match found {
+            Some(f) => f,
+            None => return cmd.to_string(), // no quoted -p prompt found
+        }
+    };
+
+    let prefix = &cmd[..prefix_end];
+    let prompt_with_quote = &cmd[prefix_end..];
+
+    if quote_char == '\'' {
+        // Single-quoted: check if it's balanced. If so, leave it alone.
+        let inner = &prompt_with_quote[1..]; // skip opening '
+        if let Some(close_pos) = inner.rfind('\'') {
+            let after_close = &inner[close_pos + 1..];
+            if after_close.trim().is_empty() {
+                // On Windows, convert single quotes to double quotes
+                if cfg!(target_os = "windows") {
+                    let raw_text = &inner[..close_pos];
+                    let escaped = raw_text.replace('"', "\\\"");
+                    info!("Fixed Claude CLI prompt quoting for Windows: single-quotes -> double-quotes ({} chars)", escaped.len());
+                    return format!("{}\"{}\"", prefix, escaped);
+                }
+                return cmd.to_string(); // well-formed single-quoted prompt on Unix
+            }
+        }
+    }
+
+    // Double-quoted (or malformed single-quoted): extract the raw text and re-wrap
+    // Strip the opening quote char
+    let rest = &prompt_with_quote[1..];
+
+    // Strip the closing quote if present (find the last occurrence of the quote char)
+    let raw_text = if let Some(close_pos) = rest.rfind(quote_char) {
+        let after = &rest[close_pos + 1..];
+        if after.trim().is_empty() {
+            &rest[..close_pos]
+        } else {
+            rest // no clear closing quote, use everything
+        }
+    } else {
+        rest // no closing quote at all
+    };
+
+    if cfg!(target_os = "windows") {
+        // Windows: use double quotes, escape inner double quotes with backslash
+        let escaped = raw_text.replace('"', "\\\"");
+        info!("Fixed Claude CLI prompt quoting for Windows: re-wrapped with escaped double-quotes ({} chars)", escaped.len());
+        format!("{}\"{}\"", prefix, escaped)
+    } else {
+        // Unix: use single quotes, escape inner single quotes with '\''
+        let escaped = raw_text.replace('\'', "'\\''");
+        info!("Fixed Claude CLI prompt quoting: double-quotes -> single-quotes ({} chars)", escaped.len());
+        format!("{}'{}'", prefix, escaped)
+    }
 }
 
 /// Extract the target directory from a command that starts with `cd <dir> && ...` or `cd <dir>; ...`
@@ -271,6 +390,58 @@ pub async fn get_registry_mut() -> tokio::sync::RwLockWriteGuard<'static, Proces
 
 // ===== EXECUTION RESULT =====
 
+/// Walk the command string respecting shell quoting rules and detect an
+/// unmatched `'` or `"`. Returns Some(diagnostic) when unbalanced, None when
+/// the command parses cleanly.
+///
+/// Rules followed (sh / bash / zsh compatible subset):
+/// - Inside `'...'`: backslash is literal, no escaping; only a closing `'` ends it.
+/// - Inside `"..."`: backslash escapes the next char (only \, $, `, ", \n).
+/// - Outside quotes: backslash escapes the next char.
+///
+/// We don't try to validate the whole command — just whether quote groups
+/// close. That's enough to catch the dominant failure mode (inlined CLI
+/// prompts with stray quotes in the data).
+fn detect_unbalanced_quotes(command: &str) -> Option<String> {
+    #[derive(PartialEq)]
+    enum State { Outside, InSingle, InDouble }
+    let mut state = State::Outside;
+    let mut chars = command.chars().peekable();
+    let mut col = 0usize;
+    let mut open_at: Option<usize> = None;
+    while let Some(c) = chars.next() {
+        col += 1;
+        match state {
+            State::Outside => match c {
+                '\'' => { state = State::InSingle; open_at = Some(col); }
+                '"'  => { state = State::InDouble; open_at = Some(col); }
+                '\\' => { let _ = chars.next(); col += 1; }
+                _ => {}
+            },
+            State::InSingle => {
+                if c == '\'' { state = State::Outside; open_at = None; }
+                // Inside single quotes, even backslash is literal.
+            },
+            State::InDouble => match c {
+                '"'  => { state = State::Outside; open_at = None; }
+                '\\' => { let _ = chars.next(); col += 1; }
+                _ => {}
+            },
+        }
+    }
+    match state {
+        State::Outside => None,
+        State::InSingle => Some(format!(
+            "unmatched single quote opened near column {} (probably a stray apostrophe in the data)",
+            open_at.unwrap_or(0)
+        )),
+        State::InDouble => Some(format!(
+            "unmatched double quote opened near column {} (probably a literal \" inside the prompt body)",
+            open_at.unwrap_or(0)
+        )),
+    }
+}
+
 /// Result of executing a terminal command
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionResult {
@@ -357,7 +528,29 @@ enum PermissionCheck {
 /// Execute a terminal command with permission checking
 pub async fn execute(command: &str, options: ExecutionOptions) -> ExecutionResult {
     info!("Terminal execute request: {}", command);
-    
+
+    // Pre-check for unbalanced shell quotes. The executor passes the command
+    // through `sh -c`, so an unmatched ' or " produces a confusing
+    // "exit 1, empty stderr" failure that the agent then retries with the same
+    // bug. This is the dominant failure mode for inlined CLI prompts
+    // (`claude -p '...'` with a stray apostrophe in the data, or `claude -p "..."`
+    // with literal double quotes inside). Reject early with a hint so the agent
+    // switches to the WRITE_FILE pattern instead of looping.
+    if let Some(reason) = detect_unbalanced_quotes(command) {
+        warn!("Command rejected — unbalanced quotes: {}", reason);
+        return ExecutionResult::denied(&format!(
+            "Shell parse error: {}.\n\
+             Inlined long prompts (`claude -p '...'`, etc.) break when the prompt body contains a matching quote.\n\
+             Fix: write the prompt to a file first, then read it with $(cat ...):\n\
+               1. WRITE_FILE:/tmp/prompt.txt\n\
+                  <full prompt body, any quotes/newlines OK>\n\
+                  WRITE_FILE_END || Writing prompt to file\n\
+               2. TERMINAL_RUN:claude -p \"$(cat /tmp/prompt.txt)\" || Running claude on the prompt\n\
+             This avoids ALL escaping issues.",
+            reason
+        ));
+    }
+
     // Parse and resolve the command
     let resolved = ResolvedCommand::parse(command, options.cwd.as_deref());
     
@@ -576,7 +769,7 @@ async fn run_command(resolved: &ResolvedCommand, options: ExecutionOptions) -> E
     
     // === DETAILED COMMAND LOGGING ===
     info!("┌─────────────────────────────────────────────────────────────");
-    info!("│ TERMINAL COMMAND EXECUTION [{}]", &process_id[..8]);
+    info!("│ TERMINAL COMMAND EXECUTION [{}]", crate::engine::types::safe_truncate(&process_id, 8));
     info!("├─────────────────────────────────────────────────────────────");
     info!("│ Original command: {}", resolved.full_command);
     if actual_command != resolved.full_command {
@@ -606,8 +799,14 @@ async fn run_command(resolved: &ResolvedCommand, options: ExecutionOptions) -> E
         c
     } else if cfg!(target_os = "windows") {
         let mut c = Command::new("cmd");
-        c.arg("/C");
-        c.arg(&actual_command);
+        // Use raw_arg to pass the entire "/C <command>" as-is, without Rust's
+        // automatic quote escaping (which uses \" that cmd.exe doesn't understand).
+        // This prevents Claude CLI prompts like "Create a webpage..." from being truncated.
+        #[cfg(target_os = "windows")]
+        {
+            c.raw_arg(format!("/C {}", &actual_command));
+            c.creation_flags(0x08000000); // CREATE_NO_WINDOW - prevent black console flash
+        }
         c
     } else {
         // Linux - use script as well
@@ -654,7 +853,12 @@ async fn run_command(resolved: &ResolvedCommand, options: ExecutionOptions) -> E
     // If command starts with "cd <dir> && ..." or "cd <dir>;", extract and track the directory
     // so the next command inherits it even without explicit cd
     if let Some(cd_dir) = extract_cd_directory(&resolved.full_command) {
-        let resolved_dir = if cd_dir.starts_with('/') || cd_dir.starts_with('~') {
+        // Check if path is absolute: Unix (/) or Windows (C:\, D:\, etc.) or home-relative (~)
+        let is_absolute = cd_dir.starts_with('/')
+            || cd_dir.starts_with('~')
+            || (cd_dir.len() >= 3 && cd_dir.as_bytes().get(1) == Some(&b':')
+                && (cd_dir.as_bytes().get(2) == Some(&b'\\') || cd_dir.as_bytes().get(2) == Some(&b'/')));
+        let resolved_dir = if is_absolute {
             // Absolute path or home-relative
             let expanded = if cd_dir.starts_with('~') {
                 dirs::home_dir()
@@ -666,7 +870,8 @@ async fn run_command(resolved: &ResolvedCommand, options: ExecutionOptions) -> E
             expanded
         } else if let Some(ref cwd) = effective_cwd {
             // Relative path - resolve against effective CWD
-            format!("{}/{}", cwd, cd_dir)
+            let sep = if cfg!(target_os = "windows") { "\\" } else { "/" };
+            format!("{}{}{}", cwd, sep, cd_dir)
         } else {
             cd_dir
         };
@@ -939,10 +1144,16 @@ async fn wait_for_process(
     let stdout_output = Arc::new(RwLock::new(String::new()));
     let stderr_output = Arc::new(RwLock::new(String::new()));
     
+    // Shared slot to capture the Claude CLI session_id from the JSONL stream.
+    // We read it after the stdout task finishes and pass it to mark_claude_cli_session_active.
+    let captured_session_id: Arc<std::sync::Mutex<Option<String>>> =
+        Arc::new(std::sync::Mutex::new(None));
+
     // Spawn stdout reader task - reads chunks for real-time output
     let stdout_task = {
         let process_id = process_id.clone();
         let output = stdout_output.clone();
+        let captured_session_id = captured_session_id.clone();
         tokio::spawn(async move {
             if let Some(stdout) = stdout_handle {
                 let mut reader = BufReader::with_capacity(256, stdout); // Smaller buffer for faster output
@@ -978,6 +1189,16 @@ async fn wait_for_process(
                                         if !claude_detected_emitted {
                                             emit_claude_cli_detected(&process_id, "claude");
                                             claude_detected_emitted = true;
+                                        }
+                                        
+                                        // Capture the session_id the first time we see it.
+                                        // Claude includes it on every event; we only need it once.
+                                        if let Some(sid) = extract_session_id_from_jsonl(&line) {
+                                            if let Ok(mut slot) = captured_session_id.lock() {
+                                                if slot.is_none() {
+                                                    *slot = Some(sid);
+                                                }
+                                            }
                                         }
                                         
                                         // Parse and process the JSONL event
@@ -1208,33 +1429,37 @@ async fn wait_for_process(
         })
     };
     
-    // Wait for completion (with optional timeout)
-    let status = if let Some(timeout) = timeout_secs {
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(timeout),
-            child.wait(),
-        ).await {
-            Ok(result) => result,
-            Err(_) => {
-                // Timeout - kill the process
-                warn!("Process {} timed out after {} seconds", process_id, timeout);
+    // Wait for completion with auto-background fallback.
+    // If the process doesn't exit within AUTO_BG_SECS, convert to background and return
+    // partial output + process ID. The LLM can then TERMINAL_READ to keep checking, or
+    // move on if it's a server. This prevents blocking the automation loop for minutes
+    // when TERMINAL_RUN is used for servers/watchers.
+    const AUTO_BG_SECS: u64 = 30;
+    let poll_interval = std::time::Duration::from_secs(2);
+    let start_time = tokio::time::Instant::now();
+
+    let status = loop {
+        let elapsed_secs = start_time.elapsed().as_secs();
+
+        // Hard timeout: kill the process (safety net, rarely hit now)
+        if let Some(timeout) = timeout_secs {
+            if elapsed_secs >= timeout {
+                warn!("Process {} hard-timed out after {} seconds, killing", process_id, timeout);
                 let _ = child.kill().await;
-                
-                // Wait for reader tasks to finish
+
                 let _ = stdout_task.await;
                 let _ = stderr_task.await;
-                
-                // Update registry
+
                 let mut registry = get_registry_mut().await;
                 registry.update(&process_id, |state| {
                     state.running = false;
                     state.exit_code = Some(-1);
                     state.ended_at = Some(chrono::Utc::now().timestamp_millis());
                 });
-                
+
                 let stdout_final = stdout_output.read().await.clone();
                 let stderr_final = stderr_output.read().await.clone();
-                
+
                 return ExecutionResult {
                     process_id,
                     success: false,
@@ -1248,8 +1473,75 @@ async fn wait_for_process(
                 };
             }
         }
-    } else {
-        child.wait().await
+
+        // Try to wait for exit with short poll interval
+        match tokio::time::timeout(poll_interval, child.wait()).await {
+            Ok(result) => {
+                // Process exited
+                break result;
+            }
+            Err(_) => {
+                // Still running — check if we should auto-background.
+                // Never auto-background Claude CLI — it needs the full session
+                // (JSONL parsing, session ID capture, clean content extraction).
+                if !is_claude_cli && elapsed_secs >= AUTO_BG_SECS {
+                    info!(
+                        "Auto-backgrounding process {}: still running after {}s",
+                        process_id, elapsed_secs
+                    );
+
+                    // Spawn background task to wait for eventual exit
+                    let pid_clone = process_id.clone();
+                    tokio::spawn(async move {
+                        match child.wait().await {
+                            Ok(status) => {
+                                let exit_code = status.code().unwrap_or(-1);
+                                let mut registry = get_registry_mut().await;
+                                registry.update(&pid_clone, |state| {
+                                    state.running = false;
+                                    state.exit_code = Some(exit_code);
+                                    state.ended_at = Some(chrono::Utc::now().timestamp_millis());
+                                });
+                                emit_process_completed(&pid_clone, Some(exit_code), status.success());
+                            }
+                            Err(e) => {
+                                error!("Failed to wait for auto-backgrounded process: {}", e);
+                                let mut registry = get_registry_mut().await;
+                                registry.update(&pid_clone, |state| {
+                                    state.running = false;
+                                    state.ended_at = Some(chrono::Utc::now().timestamp_millis());
+                                });
+                                emit_process_completed(&pid_clone, None, false);
+                            }
+                        }
+                    });
+
+                    // Mark as background in registry
+                    {
+                        let mut registry = get_registry_mut().await;
+                        registry.update(&process_id, |state| {
+                            state.background = true;
+                        });
+                    }
+
+                    // Return partial output — LLM decides whether to TERMINAL_READ or move on
+                    let stdout_current = stdout_output.read().await.clone();
+                    let stderr_current = stderr_output.read().await.clone();
+
+                    return ExecutionResult {
+                        process_id,
+                        success: true,
+                        exit_code: None,
+                        stdout: stdout_current,
+                        stderr: stderr_current,
+                        running: true,
+                        error: None,
+                        denied: false,
+                        claude_content: None,
+                    };
+                }
+            }
+        }
     };
     
     // Wait for reader tasks to finish after process completes
@@ -1283,9 +1575,11 @@ async fn wait_for_process(
             // Emit process completed event for UI
             emit_process_completed(&process_id, Some(exit_code), success);
             
-            // Mark Claude CLI session as active so subsequent calls auto-get --continue
+            // Store the session ID so subsequent Claude CLI calls use --resume <id>
+            // instead of the bare --continue flag (which resumes the global last session).
             if is_claude_cli && success {
-                mark_claude_cli_session_active();
+                let sid = captured_session_id.lock().ok().and_then(|s| s.clone());
+                mark_claude_cli_session_active(sid);
             }
             
             ExecutionResult {
@@ -1487,6 +1781,7 @@ pub async fn kill_process(process_id: &str) -> Result<(), String> {
                 // On Windows, use taskkill
                 let _ = std::process::Command::new("taskkill")
                     .args(["/PID", &pid.to_string(), "/F"])
+                    .creation_flags(0x08000000) // CREATE_NO_WINDOW
                     .output();
             }
             

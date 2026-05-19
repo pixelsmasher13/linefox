@@ -85,9 +85,11 @@ async fn check_and_run_due_schedules(app_handle: &AppHandle) {
         let app_clone = app_handle.clone();
         let auto_id = schedule.automation_id;
         let persistent_run_id = schedule.persistent_run_id;
+
         let custom_prompt = schedule.continuation_prompt;
 
         tauri::async_runtime::spawn(async move {
+            // Check if this is a continuation mode schedule
             if let Some(run_id) = persistent_run_id {
                 let today = Local::now().format("%A, %B %-d, %Y").to_string();
                 let continuation_prompt = match custom_prompt {
@@ -99,10 +101,12 @@ async fn check_and_run_due_schedules(app_handle: &AppHandle) {
 
                 info!("[Scheduler] Running continuation mode for automation {} from run {}", auto_id, run_id);
 
+                // Get the previous run info for context
                 let prev_run = match app_clone.db(|db| automation_execution_repository::get_execution_run_by_id(db, run_id)) {
                     Ok(Some(run)) => run,
                     Ok(None) => {
                         error!("[Scheduler] Continuation run {} not found, falling back to fresh execution", run_id);
+                        // Fallback to fresh execution
                         match crate::engine::automation_agent_engine::execute_automation(
                             &app_clone,
                             auto_id,
@@ -119,11 +123,13 @@ async fn check_and_run_due_schedules(app_handle: &AppHandle) {
                     }
                 };
 
+                // Get automation name
                 let automation_name = match app_clone.db(|db| automation_repository::get_automation_by_id(db, auto_id)) {
                     Ok(Some(auto)) => auto.name,
                     _ => format!("Automation #{}", auto_id),
                 };
 
+                // Build continuation plan from previous run context
                 let continuation_plan = format!(
                     "Previous completion: {}\n\nContinue executing this task with today's date context.",
                     prev_run.completion_message.as_deref().unwrap_or("No previous completion message")

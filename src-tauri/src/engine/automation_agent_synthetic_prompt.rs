@@ -66,6 +66,31 @@ pub fn get_synthetic_system_prompt_with_context_and_skills(
         "Linux"
     };
 
+    // Platform-aware terminal examples and paths
+    let (list_cmd, linefox_path, find_example_bad, find_example_good, shell_name) = if cfg!(target_os = "windows") {
+        let home = dirs::home_dir()
+            .map(|h| h.join("Linefox").to_string_lossy().to_string())
+            .unwrap_or_else(|| "C:\\Users\\You\\Linefox".to_string());
+        (
+            "dir",
+            home,
+            "dir /s C:\\ (searches entire drive - too slow!)".to_string(),
+            format!("dir {} or dir /s /b {}\\*.html", 
+                dirs::home_dir().map(|h| h.join("Linefox").to_string_lossy().to_string()).unwrap_or_else(|| "C:\\Users\\You\\Linefox".to_string()),
+                dirs::home_dir().map(|h| h.join("Linefox").to_string_lossy().to_string()).unwrap_or_else(|| "C:\\Users\\You\\Linefox".to_string()),
+            ),
+            "cmd.exe",
+        )
+    } else {
+        (
+            "ls",
+            "~/Linefox".to_string(),
+            "find ~ -name '*project*' (searches entire home - too slow!)".to_string(),
+            "ls ~/Linefox or find ~/Linefox -name '*project*'".to_string(),
+            "/bin/zsh",
+        )
+    };
+
     // Central output directory
     // let output_dir = std::env::var("AUTOMATION_OUTPUT_DIR")
     //     .unwrap_or_else(|_| "~/Documents/HeelixOutput".to_string());
@@ -209,6 +234,8 @@ You have a **50,000-character memory bank** that persists during the run.
 - Use for: collecting lists, multiple items, or data from several sources
 - Memory is large enough for extensive data collection (articles, reports, multiple items)
 - Before any final output, check CURRENT MEMORY and use ALL accumulated data
+- ⚠️ ONE save per source page/document. Extract ALL needed data in a single MEMORY_SAVE.
+  Multiple saves are for different pages/sources, not different aspects of the same page.
 {7}
 
 ────────────────────────────
@@ -220,9 +247,10 @@ You have a **50,000-character memory bank** that persists during the run.
 
 **LAUNCH:<app_name>**
 - Opens or activates an app
-- Example: LAUNCH:Safari
+- Example: LAUNCH:Google Chrome
 - ⚠️ Check if app is already active first!
 - ⚠️ CRITICAL: Use EXACT app names you would expect for this OS version
+- ⚠️ NEVER use LAUNCH:Terminal — use TERMINAL_RUN for ALL terminal/shell commands!
 
 **CLICK:<element_number>**
 - Clicks/press element by its number from the list
@@ -236,6 +264,8 @@ You have a **50,000-character memory bank** that persists during the run.
 - Multiple elements: TYPE:5:john@example.com:::8:password123:::12:My Name
 - ⚠️ CRITICAL: Use ONLY the number (e.g., TYPE:5:text) not element descriptions (NOT "TYPE:5 TextField:text")
 - ⚠️ ALWAYS specify element number for text fields
+- ⚠️ TYPE does NOT press ENTER automatically! i.e for search boxes, follow with PRESS:enter
+  Example: TYPE:5:GOOGL || typing search, then PRESS:enter || submit
 - ✅ ALWAYS USE multi-element typing to speed up forms with many fields (consolidates multiple steps)
 
 **URL:<element_number>:<url>**
@@ -244,14 +274,14 @@ You have a **50,000-character memory bank** that persists during the run.
 - Use instead of TYPE to navigate to a new webpage unless you can press BACK to return
 - When typing a website name/address, use the full URL (i.e google.com vs google)
 
-**EXCEL_TYPE:<cell>:<value>:::<cell>:<value>...**
+**EXCEL_TYPE:<cell>:<value>|||<cell>:<value>...**
 - Enter data directly into Excel cells using native commands
 - Cell references use standard Excel notation (A1, B2, C3, etc.)
 - ⚠️ Excel must be the active application with a worksheet open
 - ✅ Use for bulk data entry into EXCEL, no limit to number of entries
 
 Data Entry Examples:
-- Multiple rows: EXCEL_TYPE:A3:MacBook Pro:::B3:2499:::C3:5:::D3:=B3*C3:::A4:AirPods Pro:::B4:249:::C4:25:::D4:=B4*C4
+- Multiple rows: EXCEL_TYPE:A3:MacBook Pro|||B3:2499|||C3:5|||D3:=B3*C3|||A4:AirPods Pro|||B4:249|||C4:25|||D4:=B4*C4
 
 Formula Examples:
 - Sum: EXCEL_TYPE:B10:=SUM(B2:B9)
@@ -314,6 +344,8 @@ Formula Examples:
 - Be concise but complete - you have 5000 chars total
 - Memory shown each turn under "CURRENT MEMORY"
 ⚠️ CRITICAL: Store ONLY the DATA, not explanations or reasoning!
+- ⚠️ ONE save per source page/document. Extract ALL needed data in a single MEMORY_SAVE.
+  Multiple saves are for different pages, not different aspects of the same page.
 
 Examples:
 MEMORY_SAVE:Contact emails: john@example.com, sarah@company.org || Extracting email addresses for later use
@@ -324,68 +356,7 @@ MEMORY_SAVE:Product 1: $299 || Extracting details for element 127 that's a headp
 RIGHT (do this):
 MEMORY_SAVE:Product 1: Sony Headphones - $299 - Noise-cancelling || Extracting first product
 
-**TERMINAL_RUN:<command>** (macOS only)
-- Execute a shell command directly via the system terminal
-- Output is captured and stored in memory for reference
-- ⚠️ User will be prompted to approve commands not in the allowlist
-
-⚡ PREFER TERMINAL_RUN OVER UI AUTOMATION whenever a CLI tool can do the job.
-Opening apps and clicking through UIs is slow and fragile. If a CLI exists for the task, use it.
-⚠️ EXCEPTION: Do NOT use CLI tools (curl, wget, etc.) to fetch web pages unless absolutely necessary. Use the BROWSER for any web browsing, searching, or page reading tasks — CLI tools miss dynamic content, JavaScript rendering, and authentication.
-Examples where CLI beats UI:
-- Code tasks → `claude` or `openai` CLI instead of opening an editor
-- Git operations → `git` CLI instead of opening GitHub Desktop
-- File operations → shell commands instead of Finder
-- Package installs → `npm`/`pip`/`brew` instead of opening a GUI installer
-- Data processing → `jq`, `rg`, `ffmpeg` instead of opening an app
-
-AI CLI tools — USE THESE for coding tasks ONLY (not research, analysis, or web browsing):
-- claude - Claude Code CLI: implement features, edit files, debug, review code
-- openai - OpenAI CLI: same class of tasks
-- aider - AI pair programming in your local repo
-If `claude` or `openai` is available on this machine (see AVAILABLE CLI TOOLS below), use TERMINAL_RUN with it for coding tasks.
-
-⚠️ AVOID SLOW COMMANDS - Commands timeout after 15 minutes!
-- ✗ BAD: find ~ -name '*project*' (searches entire home - too slow!)
-- ✓ GOOD: ls ~/Linefox or find ~/Linefox -name '*project*'
-- Projects are in ~/Linefox by default - search there, not ~
-
-⚠️ CRITICAL: Claude CLI Session & Permission Management
-Each `claude "prompt"` starts a NEW session with NO memory of previous commands!
-
-SESSION CONTINUITY:
-- First command: claude -p "task description"
-- Follow-up commands: claude -p --continue "next instruction"
-
-⚠️ IMPORTANT: Claude CLI commands must START with "claude" - no cd prefix!
-The default working directory is ~/Linefox. Include a specific path in your prompt if needed.
-
-Example multi-step Claude workflow:
-1. TERMINAL_RUN:claude -p "implement auth feature in ~/project" || Initial implementation
-2. TERMINAL_RUN:claude -p --continue "write the code to files" || Continue SAME session
-3. TERMINAL_RUN:claude -p --continue "add tests" || Still same session
-
-WITHOUT --continue = Claude forgets context.
-NOTE: File write permissions and bash access are granted automatically — do NOT add --permission-mode.
-
-General examples:
-- TERMINAL_RUN:npm install express || Installing Express.js
-- TERMINAL_RUN:git clone https://github.com/user/repo || Clone repository
-
-**TERMINAL_BACKGROUND:<command>** (macOS only)
-- Start a long-running process in the background (servers, watchers, dev servers)
-- Returns a process ID immediately — the process keeps running
-- Use TERMINAL_CHECK or TERMINAL_READ to monitor output, TERMINAL_KILL to stop
-- ⚠️ CRITICAL: You MUST use TERMINAL_BACKGROUND instead of TERMINAL_RUN for commands that run indefinitely:
-  - Dev servers: npm run dev, next dev, vite, flask run, rails server, cargo watch
-  - File watchers: npm run watch, tsc --watch, nodemon
-  - Any process that serves on a port or watches for changes
-  - If unsure whether a command exits on its own, use TERMINAL_BACKGROUND to be safe
-- TERMINAL_RUN will HANG forever on these commands because it waits for exit!
-- Examples:
-  - TERMINAL_BACKGROUND:npm run dev || Starting dev server (runs indefinitely)
-  - TERMINAL_BACKGROUND:python -m http.server 8080 || Starting HTTP server
-  - TERMINAL_BACKGROUND:npx tailwindcss --watch || Watching for CSS changes
+TERMINAL_PLACEHOLDER
 
 **TERMINAL_CHECK:<process_id>**
 - Check if a background process is still running
@@ -401,10 +372,8 @@ General examples:
 
 **GOOGLE_SEARCH:<query>**
 - Opens Chrome, navigates directly to Google search results page, waits for page load
-- ⚠️ Use for quick lookups on the PUBLIC internet (prices, addresses, public info, documentation)
-- ⚠️ Do NOT use for sites requiring login — use normal LAUNCH + URL navigation for authenticated sites
+- Use if your first step is to open browser and search on google, you'll see the results of the search.
 - Example: GOOGLE_SEARCH:AAPL stock price today || Looking up current Apple stock price. Next: extract the price from search results.
-- Example: GOOGLE_SEARCH:python requests library documentation || Finding Python requests docs. Next: read the relevant content.
 
 ────────────────────────────
 # YOUR RESPONSE FORMAT
@@ -416,7 +385,7 @@ Provide your command with a 15-40 word explanation that includes:
 3. What you EXPECT to see/happen after this action (e.g., "expect login form", "expect results list", "expect confirmation page")
 4. What your planned next step in the script is - or specify possible branch of next steps depending on UI state
 5. If there's a very similar element that you could have also interacted with (similar semantic meaning or similar description / value)**: Note your choice with element type/description (e.g., "Choosing 12 over AXButton 'Save Draft' - expect submit not draft")
-6. If using memory, mention what you're adding and why (e.g., "Adding first item to memory for later compilation")
+6. If using memory, briefly name WHAT category you're adding and WHY — do NOT restate the memory contents (e.g., "Adding first item for later compilation"). Stay within the 15-40 word cap.
 
 ⚠️ CRITICAL: Include SPECIFIC IDENTIFIERS in your explanations:
 - For web pages: Include the actual URL or page title
@@ -424,7 +393,7 @@ Provide your command with a 15-40 word explanation that includes:
 - For forms: Include what specific data you're entering
 - For navigation: Include where you're navigating FROM and TO
 
-Example: LAUNCH:Notes || Opening app for output (Step 9). Next: paste the collected content (Step 10).
+⚠️ DO NOT open apps (Notes, TextEdit, etc.) just to present or display collected data. When you COMPLETE, your MEMORY is automatically presented to the user in the chat. Only open external apps if the user explicitly asked to save/export to a specific app or file.
 
 COMMAND || EXPLANATION
 
@@ -455,23 +424,135 @@ REQUEST_TAKEOVER:<detailed instructions> || <explanation>
 ALL_ELEMENTS || <explanation>
 FULL_TEXT || <explanation>
 MEMORY_SAVE:<plain language notes> || <explanation>
-EXCEL_TYPE:<cell>:<value>[:::<cell>:<value>...] || <explanation>
-TERMINAL_RUN:<shell command> || <explanation>  # (macOS) Run terminal command
-TERMINAL_BACKGROUND:<shell command> || <explanation>  # (macOS) Start background process
+EXCEL_TYPE:<cell>:<value>[|||<cell>:<value>...] || <explanation>
+TERMINAL_RUN:<shell command> || <explanation>  # Run terminal command
+TERMINAL_BACKGROUND:<shell command> || <explanation>  # Start background process
 TERMINAL_CHECK:<process_id> || <explanation>  # Check background process status
 TERMINAL_KILL:<process_id> || <explanation>  # Stop background process
 TERMINAL_READ:<process_id> || <explanation>  # Read background process output
 GOOGLE_SEARCH:<query> || <explanation>  # Quick Google search (opens Chrome, navigates to results)
+FETCH_PAGES:<url1>,<url2>,... || <explanation>  # Parallel HTTP fetch (no browser); see FETCH_PAGES rules above
+WRITE_FILE:<file_path>   # Write file directly (multi-line block, see below)
+<content>
+WRITE_FILE_END || <explanation>
 
 ❌ DO NOT invent commands! Any command not listed here will cause a parse error and waste an action.
 ❌ DO NOT use PRESS:pagedown to scroll web pages - use FULL_TEXT to get all page content instead.
 
-📄 For LONG DOCUMENTS (10-K filings, articles, reports, web pages): Use FULL_TEXT to retrieve complete page content, then MEMORY_SAVE the relevant data.
+📄 For LONG DOCUMENTS (10-K filings, articles, reports, web pages): Use FULL_TEXT to retrieve complete page content, then ONE MEMORY_SAVE with ALL the relevant data from that document.
 📄 PRESS:pagedown is ONLY for desktop apps (Excel, Word) where FULL_TEXT doesn't apply.
 
 Choose the command that best advances toward the objective.
 "#,
     os_name, current_date, current_time, select_all_key, copy_key, paste_key, cut_key, MEMORY_EXAMPLE));
+
+    // Replace the terminal placeholder with platform-aware terminal documentation
+    let alt_list_cmd = if cfg!(target_os = "windows") { "ls" } else { "dir" };
+    let terminal_section = format!(r#"**TERMINAL_RUN:<command>**
+- Execute a shell command via the system terminal ({shell_name} on {os_name})
+- Output is captured and stored in memory for reference
+- ⚠️ User will be prompted to approve commands not in the allowlist
+- ⚠️ IMPORTANT: Use {os_name}-compatible commands! (e.g., `{list_cmd}` not `{alt_list_cmd}`)
+
+⚡ PREFER TERMINAL_RUN OVER UI AUTOMATION whenever a CLI tool can do the job outside of browser, office apps.
+Opening apps and clicking through UIs is slow and fragile. If a CLI exists for the task, use it.
+⚠️ EXCEPTION: Do NOT use CLI tools (curl, wget, etc.) to fetch web pages unless absolutely necessary. Use the BROWSER for any web browsing, searching, or page reading tasks — CLI tools miss dynamic content, JavaScript rendering, and authentication.
+Examples where CLI beats UI:
+- Code tasks → `claude` or `openai` CLI instead of opening an editor
+- Git operations → `git` CLI instead of opening GitHub Desktop
+- File operations → shell commands instead of Finder
+- Package installs → `npm`/`pip`/`brew` instead of opening a GUI installer
+- Data processing → `jq`, `rg`, `ffmpeg` instead of opening an app
+
+AI CLI tools — USE THESE for coding tasks ONLY (not research, analysis, or web browsing):
+- claude - Claude Code CLI: implement features, edit files, debug, review code
+- openai - OpenAI CLI: same class of tasks
+- aider - AI pair programming in your local repo
+If `claude` or `openai` is available on this machine (see AVAILABLE CLI TOOLS below), use TERMINAL_RUN with it for coding tasks.
+
+⚠️ AVOID SLOW COMMANDS - Commands timeout after 15 minutes!
+- ✗ BAD: {find_example_bad}
+- ✓ GOOD: {find_example_good}
+- Projects are in {linefox_path} by default - search there first
+
+⚠️ INTERACTIVE COMMANDS WILL HANG! Terminal has no stdin — commands that prompt for input will freeze forever.
+ALWAYS use non-interactive flags:
+- Scaffolding tools: `yes | npx create-next-app myapp` or `npx create-next-app myapp --yes`
+- npm init: `npm init -y`
+
+⚠️ CRITICAL: Claude CLI Session & Permission Management
+Each `claude "prompt"` starts a NEW session with NO memory of previous commands!
+
+SESSION CONTINUITY:
+- First command: claude -p "task description"
+- Follow-up commands: claude -p --continue "next instruction"
+
+⚠️ IMPORTANT: Claude CLI commands must START with "claude" - no cd prefix!
+The default working directory is {linefox_path}. Include a specific path in your prompt if needed.
+
+Example multi-step Claude workflow:
+1. TERMINAL_RUN:claude -p "implement auth feature in {linefox_path}" || Initial implementation
+2. TERMINAL_RUN:claude -p --continue "write the code to files" || Continue SAME session
+3. TERMINAL_RUN:claude -p --continue "add tests" || Still same session
+
+WITHOUT --continue = Claude forgets context.
+NOTE: File write permissions and bash access are granted automatically — do NOT add --permission-mode.
+
+⚠️ Read code files directly — follow imports/API calls. Don't ls directories or read READMEs to "explore".
+New project? Create directly in {linefox_path}. Don't explore existing projects unless continuing a prior task.
+
+General examples:
+- TERMINAL_RUN:npm install express || Installing Express.js
+- TERMINAL_RUN:git clone https://github.com/user/repo || Clone repository
+- TERMINAL_RUN:cat {linefox_path}/myproject/package.json || Read existing project config
+
+**TERMINAL_BACKGROUND:<command>**
+- Start a long-running process in the background (servers, watchers, dev servers)
+- Returns a process ID immediately — the process keeps running
+- Use TERMINAL_CHECK or TERMINAL_READ to monitor output, TERMINAL_KILL to stop
+- ⚠️ CRITICAL: You MUST use TERMINAL_BACKGROUND instead of TERMINAL_RUN for commands that run indefinitely:
+  - Dev servers: npm run dev, next dev, vite, flask run, rails server, cargo watch
+  - File watchers: npm run watch, tsc --watch, nodemon
+  - Any process that serves on a port or watches for changes
+  - If unsure whether a command exits on its own, use TERMINAL_BACKGROUND to be safe
+- TERMINAL_RUN will HANG forever on these commands because it waits for exit!
+- Examples:
+  - TERMINAL_BACKGROUND:npm run dev || Starting dev server (runs indefinitely)
+  - TERMINAL_BACKGROUND:python -m http.server 8080 || Starting HTTP server
+  - TERMINAL_BACKGROUND:npx tailwindcss --watch || Watching for CSS changes
+
+**WRITE_FILE:<path>** (multi-line block command)
+- Write content directly to a file — NO shell escaping needed!
+- For projects/multi-file work: prefer Claude/OpenAI CLI if available (faster, reasons about code)
+- For small one-off files (single HTML page, a config, a simple script): WRITE_FILE is perfect
+- Format:
+  WRITE_FILE:/path/to/file.tsx
+  import React from 'react';
+  export default function App() {{
+    return <div>Hello</div>;
+  }}
+  WRITE_FILE_END || Writing React component
+- Creates parent directories automatically, overwrites if file exists
+
+**FETCH_PAGES:<url1>,<url2>,...** (up to 8 URLs, comma-separated)
+- Parallel HTTP fetch — NO browser, NO Chrome involvement. Strips HTML to readable text. ~3s total regardless of batch size.
+- ⭐ PREFER FETCH_PAGES over the browser for any public, fetchable page. It's faster, free, and doesn't touch the user's Chrome.
+- ✅ USE for: known-stable URLs (finance.yahoo.com/quote/<TICKER>/<page>, stockanalysis.com/stocks/<ticker>, wikipedia.org/wiki/<topic>, macrotrends.net, public docs), URLs you observed verbatim in prior search results or page output.
+- ❌ DO NOT use for: guessed/fabricated URLs (don't invent investor.<company>-corp.com, SEC EDGAR deep paths, Seeking Alpha IDs — search first). Behind logins, paywalls, heavy JS (WSJ, Bloomberg articles, LinkedIn, SA premium) — use the browser.
+- ⭐ BATCH 3–8 related URLs in one call when fetching related data from trusted sources — same cost as one URL, finishes in ~3s.
+- ⚠️ ONE FETCH PER URL PER RUN — the system enforces this. If a URL succeeded, content is in your RECENT ACTIONS / MEMORY — re-read it, don't re-fetch. If it failed, it'll fail again — try a different URL.
+- 💡 Use MEMORY_SAVE immediately after FETCH_PAGES to retain findings — fetched content won't persist past the next turn.
+- Example: FETCH_PAGES:https://finance.yahoo.com/quote/TSLA,https://finance.yahoo.com/quote/TSLA/financials,https://stockanalysis.com/stocks/tsla/financials/ || Fetching Tesla fundamentals from 3 trusted sources in parallel.
+"#,
+        shell_name = shell_name,
+        os_name = os_name,
+        list_cmd = list_cmd,
+        alt_list_cmd = alt_list_cmd,
+        find_example_bad = find_example_bad,
+        find_example_good = find_example_good,
+        linefox_path = linefox_path,
+    );
+    prompt = prompt.replace("TERMINAL_PLACEHOLDER", &terminal_section);
 
     // Add app-specific commands if provided (these are dynamic based on current app)
     if let Some(app_commands) = app_specific_commands {

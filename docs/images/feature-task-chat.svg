@@ -1,0 +1,152 @@
+<svg viewBox="0 0 1280 580" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Describe any task — Linefox plans the steps and runs them across your apps">
+  <defs>
+    <linearGradient id="bg-tc" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FAFAFA"/>
+      <stop offset="100%" stop-color="#FFFFFF"/>
+    </linearGradient>
+    <radialGradient id="blueGlow-tc" cx="85%" cy="15%" r="55%">
+      <stop offset="0%" stop-color="#3363AD" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#3363AD" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="cardShadow-tc" x="-2%" y="-2%" width="104%" height="108%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#000000" flood-opacity="0.05"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1280" height="580" fill="url(#bg-tc)"/>
+  <rect width="1280" height="580" fill="url(#blueGlow-tc)"/>
+
+  <!-- Section label -->
+  <text x="80" y="70"
+        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+        font-size="14"
+        font-weight="600"
+        fill="#3363AD"
+        letter-spacing="2">DESCRIBE THE TASK</text>
+  <text x="80" y="108"
+        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+        font-size="32"
+        font-weight="700"
+        fill="#18181B"
+        letter-spacing="-0.8">Plain English in, real work out</text>
+  <text x="80" y="138"
+        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+        font-size="15"
+        font-weight="400"
+        fill="#71717A">Tell Linefox what you want. It plans the steps, drives your real browser and apps, and reports back.</text>
+
+  <!-- Main chat card -->
+  <g filter="url(#cardShadow-tc)">
+    <rect x="80" y="180" width="1120" height="360" rx="14" ry="14" fill="#FFFFFF" stroke="#E4E4E7" stroke-width="1"/>
+  </g>
+  <line x1="80" y1="226" x2="1200" y2="226" stroke="#F4F4F5" stroke-width="1"/>
+
+  <!-- Card header -->
+  <g transform="translate(112, 207)">
+    <circle cx="6" cy="0" r="5" fill="#3363AD"/>
+    <text x="22" y="4"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+          font-size="13"
+          font-weight="600"
+          fill="#27272A">New automation · running locally</text>
+    <text x="1056" y="4"
+          text-anchor="end"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+          font-size="14"
+          font-weight="500"
+          fill="#71717A">Claude Sonnet 4.5</text>
+  </g>
+
+  <!-- User question bubble (right-aligned, blue) -->
+  <g transform="translate(440, 256)">
+    <rect x="0" y="0" width="728" height="36" rx="14" fill="#3363AD"/>
+    <text x="20" y="22"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+          font-size="14"
+          font-weight="500"
+          fill="#FFFFFF">Find Tesla's latest 10-K, pull out segment revenue + capex, and drop the numbers into the open Excel sheet</text>
+  </g>
+
+  <!-- Agent step list -->
+  <g transform="translate(112, 318)">
+    <!-- Step 1: complete -->
+    <circle cx="10" cy="10" r="10" fill="#10B981"/>
+    <polyline points="5.5,10.5 9,14 15,7" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="32" y="14"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+          font-size="14"
+          font-weight="500"
+          fill="#27272A">GOOGLE_SEARCH · "Tesla 10-K 2024 SEC filing"</text>
+    <text x="1056" y="14"
+          text-anchor="end"
+          font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="12"
+          fill="#71717A">2.1s</text>
+
+    <!-- Step 2: complete -->
+    <circle cx="10" cy="44" r="10" fill="#10B981"/>
+    <polyline points="5.5,44.5 9,48 15,41" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="32" y="48"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+          font-size="14"
+          font-weight="500"
+          fill="#27272A">FETCH_PAGES · sec.gov/.../tsla-20241231.htm</text>
+    <text x="1056" y="48"
+          text-anchor="end"
+          font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="12"
+          fill="#71717A">3.4s</text>
+
+    <!-- Step 3: complete -->
+    <circle cx="10" cy="78" r="10" fill="#10B981"/>
+    <polyline points="5.5,78.5 9,82 15,75" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="32" y="82"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+          font-size="14"
+          font-weight="500"
+          fill="#27272A">MEMORY_SAVE · automotive=$77.07B, energy=$10.09B, services=$10.53B</text>
+    <text x="1056" y="82"
+          text-anchor="end"
+          font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="12"
+          fill="#71717A">0.1s</text>
+
+    <!-- Step 4: in progress -->
+    <circle cx="10" cy="112" r="10" fill="#3363AD" opacity="0.18"/>
+    <circle cx="10" cy="112" r="4" fill="#3363AD">
+      <animate attributeName="opacity" values="1;0.3;1" dur="1.2s" repeatCount="indefinite"/>
+    </circle>
+    <text x="32" y="116"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+          font-size="14"
+          font-weight="500"
+          fill="#27272A">EXCEL_TYPE · B3:=77073 · B4:=10086 · B5:=10534 · into Microsoft Excel</text>
+    <g transform="translate(960, 100)">
+      <rect x="0" y="0" width="96" height="24" rx="12" fill="#EFF6FF"/>
+      <circle cx="14" cy="12" r="3" fill="#3363AD">
+        <animate attributeName="opacity" values="1;0.3;1" dur="0.9s" repeatCount="indefinite"/>
+      </circle>
+      <text x="26" y="16"
+            font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+            font-size="13"
+            font-weight="600"
+            fill="#1E40AF">running</text>
+    </g>
+
+    <!-- Step 5: queued -->
+    <circle cx="10" cy="146" r="10" fill="#FFFFFF" stroke="#E4E4E7" stroke-width="1.5"/>
+    <text x="32" y="150"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+          font-size="14"
+          font-weight="500"
+          fill="#A1A1AA">COMPLETE · summarize results + cite the filing URL</text>
+  </g>
+
+  <!-- Composer hint -->
+  <rect x="112" y="488" width="1056" height="36" rx="8" fill="#F9FAFB" stroke="#F4F4F5" stroke-width="1"/>
+  <text x="128" y="510"
+        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
+        font-size="13"
+        fill="#A1A1AA">Type a follow-up, or hit ⌘+S to save this as a reusable automation…</text>
+</svg>

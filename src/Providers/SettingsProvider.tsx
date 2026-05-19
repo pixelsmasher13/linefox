@@ -20,6 +20,7 @@ export const DEFAULT_SETTINGS: Settings = {
   auto_start: false,
   api_choice: "claude",
   api_key_claude: "",
+  api_key_claude_oauth: "",
   api_key_open_ai: "",
   api_key_grok: "",
   api_key_gemini: "",
@@ -28,6 +29,8 @@ export const DEFAULT_SETTINGS: Settings = {
   store_task_data: true,
   model_claude: "claude-sonnet-4-5-20250929",
   model_openai: "gpt-5",
+  model_openai_codex: "gpt-5.5",
+  openai_codex_reasoning_effort: "medium",
   model_grok: "grok-3",
   model_gemini: "gemini-2.5-flash",
   model_deepseek: "deepseek-chat",
@@ -37,13 +40,31 @@ type Update = {
   (settings: Settings): Promise<void>;
 };
 
-type ApiChoice = "claude" | "openai" | "grok" | "gemini" | "deepseek";
+export type CodexReasoningEffort =
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh";
+
+export type ApiChoice =
+  | "claude"
+  | "claude-subscription"
+  | "openai"
+  | "openai-codex"
+  | "grok"
+  | "gemini"
+  | "deepseek";
 export type Settings = {
   is_dev_mode: boolean;
   interval: string;
   auto_start: boolean;
   api_choice: ApiChoice;
   api_key_claude: string;
+  /// Claude Pro/Max OAuth token (`sk-ant-oat01-...`) used when
+  /// api_choice === "claude-subscription". Distinct from api_key_claude so
+  /// users can keep both an API key and a subscription token configured.
+  api_key_claude_oauth: string;
   api_key_open_ai: string;
   api_key_grok: string;
   api_key_gemini: string;
@@ -52,6 +73,10 @@ export type Settings = {
   store_task_data: boolean;
   model_claude: string;
   model_openai: string;
+  /// Model used when api_choice === "openai-codex" (ChatGPT subscription via Codex Responses).
+  model_openai_codex: string;
+  /// "minimal" | "low" | "medium" | "high" | "xhigh"
+  openai_codex_reasoning_effort: string;
   model_grok: string;
   model_gemini: string;
   model_deepseek: string;
@@ -95,6 +120,7 @@ export const SettingsProvider: FC<PropsWithChildren> = ({ children }) => {
       api_choice:
         (getSettingOrEmpty(response, "api_choice") as ApiChoice) || "claude",
       api_key_claude: getSettingOrEmpty(response, "api_key_claude") || "",
+      api_key_claude_oauth: getSettingOrEmpty(response, "api_key_claude_oauth") || "",
       api_key_open_ai: getSettingOrEmpty(response, "api_key_open_ai") || "",
       api_key_grok: getSettingOrEmpty(response, "api_key_grok") || "",
       api_key_gemini: getSettingOrEmpty(response, "api_key_gemini") || "",
@@ -103,6 +129,8 @@ export const SettingsProvider: FC<PropsWithChildren> = ({ children }) => {
       store_task_data: storeTaskData,
       model_claude: getSettingOrEmpty(response, "model_claude") || "claude-sonnet-4-5-20250929",
       model_openai: getSettingOrEmpty(response, "model_openai") || "gpt-5",
+      model_openai_codex: getSettingOrEmpty(response, "model_openai_codex") || "gpt-5.5",
+      openai_codex_reasoning_effort: getSettingOrEmpty(response, "openai_codex_reasoning_effort") || "medium",
       model_grok: getSettingOrEmpty(response, "model_grok") || "grok-3",
       model_gemini: getSettingOrEmpty(response, "model_gemini") || "gemini-2.5-flash",
       model_deepseek: getSettingOrEmpty(response, "model_deepseek") || "deepseek-chat",

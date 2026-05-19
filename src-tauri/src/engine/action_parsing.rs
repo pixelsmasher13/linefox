@@ -63,6 +63,12 @@ const EXCEL_COMMANDS: &[&str] = &[
     "EXCEL_GET_RANGE_FORMULAS:",
     "EXCEL_GET_SHEET_INFO",
     "EXCEL_GET_STRUCTURE:",
+    "EXCEL_FREEZE_PANES:",
+    "EXCEL_UNFREEZE_PANES",
+    "EXCEL_SAVE_AS:",
+    "EXCEL_SAVE",
+    "EXCEL_NEW_WORKBOOK",
+    "EXCEL_OPEN_WORKBOOK:",
 ];
 
 // List of Word-specific commands (AppleScript on macOS, COM on Windows)
@@ -72,6 +78,7 @@ const WORD_COMMANDS: &[&str] = &[
     "WORD_CLOSE",
     "WORD_INSERT_TEXT:",
     "WORD_INSERT_PARAGRAPH:",
+    "WORD_INSERT_HEADING:",
     "WORD_FIND_REPLACE:",
     "WORD_DELETE",
     "WORD_SET_FONT:",
@@ -95,6 +102,10 @@ const WORD_COMMANDS: &[&str] = &[
     "WORD_MOVE_AFTER_TEXT:",
     // Cursor positioning (Windows COM)
     "WORD_DESELECT",
+    "WORD_RESET_FORMATTING",
+    "WORD_UNBOLD",
+    "WORD_UNITALIC",
+    "WORD_UNUNDERLINE",
     "WORD_GOTO_START",
     "WORD_GOTO_END",
     "WORD_SET_CURSOR:",
@@ -177,7 +188,9 @@ pub fn parse_agent_action(action_json: &str) -> Result<AgentAction, String> {
        action_json.contains("EXCEL_TYPE:") || action_json.contains("STUCK") ||
        contains_excel_command(action_json) ||
        contains_word_command(action_json) || contains_powerpoint_command(action_json) ||
-       contains_terminal_command(action_json) || action_json.contains("GOOGLE_SEARCH:") {
+       contains_terminal_command(action_json) || action_json.contains("GOOGLE_SEARCH:") ||
+       action_json.contains("WRITE_FILE:") || action_json.contains("BROWSER_CONSOLE") ||
+       action_json.contains("FETCH_PAGES:") {
 
         // Special handling for MEMORY_SAVE to preserve multi-line content
         if action_json.contains("MEMORY_SAVE:") {
@@ -213,6 +226,14 @@ pub fn parse_agent_action(action_json: &str) -> Result<AgentAction, String> {
             }
         }
 
+        // Special handling for WRITE_FILE multi-line block command
+        // Format: WRITE_FILE:<path>\n<content>\nWRITE_FILE_END || justification
+        if action_json.contains("WRITE_FILE:") {
+            if let Some(result) = parse_write_file_command(action_json) {
+                return result;
+            }
+        }
+
         // Special handling for commands with potentially long/multi-line text content
         // We need to find the LAST " || " in the entire response because the text content may contain newlines
         // This applies to: TYPE, WORD_INSERT_TEXT, WORD_INSERT_PARAGRAPH, WORD_SELECT_TEXT, and similar text-heavy commands
@@ -220,11 +241,14 @@ pub fn parse_agent_action(action_json: &str) -> Result<AgentAction, String> {
         let needs_rfind_parsing = trimmed.starts_with("TYPE:") ||
                                   trimmed.starts_with("WORD_INSERT_TEXT:") ||
                                   trimmed.starts_with("WORD_INSERT_PARAGRAPH:") ||
+                                  trimmed.starts_with("WORD_INSERT_HEADING:") ||
                                   trimmed.starts_with("WORD_SELECT_TEXT:") ||
                                   trimmed.starts_with("WORD_MOVE_AFTER_TEXT:") ||
                                   trimmed.starts_with("WORD_FIND_REPLACE:") ||
                                   trimmed.starts_with("WORD_SELECT_BETWEEN:") ||
-                                  trimmed.starts_with("EXCEL_TYPE:");
+                                  trimmed.starts_with("EXCEL_TYPE:") ||
+                                  trimmed.starts_with("TERMINAL_RUN:") ||
+                                  trimmed.starts_with("TERMINAL_BACKGROUND:");
 
         if needs_rfind_parsing {
             let (full_command, full_justification) = if let Some(pipe_pos) = action_json.rfind(" || ") {
@@ -244,15 +268,98 @@ pub fn parse_agent_action(action_json: &str) -> Result<AgentAction, String> {
 
             // Route to appropriate parser based on command type
             if trimmed.starts_with("TYPE:") {
-                let command_part = full_command.trim_start_matches("TYPE:").trim();
-                let is_multi_element = command_part.contains(":::");
-                if is_multi_element {
-                    return parse_multi_element_type(command_part, full_justification);
-                } else {
-                    return parse_single_element_type(command_part, full_justification);
+                let mut command_part = full_command.trim_start_matches("TYPE:").trim().to_string();
+
+                // Check for :::PRESS:<key> or :::CLICK:<id> suffix (LLM shorthand for type then press/click)
+                // e.g., TYPE:39:search text:::PRESS:enter or TYPE:19:dog:::CLICK:20
+                //
+                // Accepts both ::: (canonical) and :: (common LLM variant) as the separator —
+                // detected by anchoring on the keyword "::PRESS:" / "::CLICK:" with at least
+                // two preceding colons. Without this fallback, "TYPE:5:hi::PRESS:enter" would
+                // type the literal "::PRESS:enter" into the focused field.
+                let mut follow_up_key: Option<String> = None;
+                let mut follow_up_click: Option<String> = None;
+
+                let upper = command_part.to_uppercase();
+                let press_pos = upper.rfind("::PRESS:");
+                let click_pos = upper.rfind("::CLICK:");
+                let suffix_match: Option<(usize, &str)> = match (press_pos, click_pos) {
+                    (Some(p), Some(c)) if p >= c => Some((p, "PRESS:")),
+                    (Some(_), Some(c)) => Some((c, "CLICK:")),
+                    (Some(p), None) => Some((p, "PRESS:")),
+                    (None, Some(c)) => Some((c, "CLICK:")),
+                    (None, None) => None,
+                };
+
+                if let Some((sep_start, kind)) = suffix_match {
+                    // Walk back to consume any extra preceding colons (handles ::: as well as ::)
+                    // so command_part doesn't keep a stray trailing ':' after stripping.
+                    let bytes = command_part.as_bytes();
+                    let mut content_end = sep_start;
+                    while content_end > 0 && bytes[content_end - 1] == b':' {
+                        content_end -= 1;
+                    }
+                    // After "::" come the keyword bytes ("PRESS:" or "CLICK:" — both 6 chars).
+                    let value_start = sep_start + 2 + kind.len();
+                    let value = command_part[value_start..].trim();
+
+                    if kind == "PRESS:" {
+                        let key = value.to_lowercase();
+                        if !key.is_empty() {
+                            follow_up_key = Some(key);
+                            command_part = command_part[..content_end].trim_end().to_string();
+                        }
+                    } else {
+                        let element_num = value.split_whitespace().next().unwrap_or(value);
+                        if let Ok(index) = element_num.parse::<usize>() {
+                            if let Some(element) = get_element_by_index(index) {
+                                #[cfg(target_os = "macos")]
+                                let element_path = element.path.clone();
+
+                                #[cfg(target_os = "windows")]
+                                let element_path = if let Some(ref_id) = element["element_ref"].as_str() {
+                                    ref_id.to_string()
+                                } else {
+                                    element["element_path"].as_str().unwrap_or("").to_string()
+                                };
+
+                                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                                let element_path = String::new();
+
+                                follow_up_click = Some(element_path);
+                                command_part = command_part[..content_end].trim_end().to_string();
+                            } else {
+                                return Err(format!("No element found at index {} for follow-up CLICK", index));
+                            }
+                        } else {
+                            return Err(format!("Invalid element reference '{}' in TYPE follow-up CLICK. Please use a number.", element_num));
+                        }
+                    }
                 }
+
+                let is_multi_element = command_part.contains(":::");
+                let mut result = if is_multi_element {
+                    parse_multi_element_type(&command_part, full_justification)
+                } else {
+                    parse_single_element_type(&command_part, full_justification)
+                };
+
+                // If there's a follow-up key or click, add it to parameters
+                if let Ok(ref mut action) = result {
+                    if let Some(ref mut params) = action.parameters {
+                        if let Some(key) = follow_up_key {
+                            params.insert("follow_up_key".to_string(), key);
+                        }
+                        if let Some(click_path) = follow_up_click {
+                            params.insert("follow_up_click".to_string(), click_path);
+                        }
+                    }
+                }
+
+                return result;
             } else if trimmed.starts_with("WORD_INSERT_TEXT:") ||
                       trimmed.starts_with("WORD_INSERT_PARAGRAPH:") ||
+                      trimmed.starts_with("WORD_INSERT_HEADING:") ||
                       trimmed.starts_with("WORD_SELECT_TEXT:") ||
                       trimmed.starts_with("WORD_MOVE_AFTER_TEXT:") ||
                       trimmed.starts_with("WORD_FIND_REPLACE:") ||
@@ -262,6 +369,10 @@ pub fn parse_agent_action(action_json: &str) -> Result<AgentAction, String> {
                     .unwrap_or_else(|| Err(format!("Failed to parse Word command: {}", full_command)));
             } else if trimmed.starts_with("EXCEL_TYPE:") {
                 return parse_excel_type_command(full_command, full_justification);
+            } else if trimmed.starts_with("TERMINAL_RUN:") || trimmed.starts_with("TERMINAL_BACKGROUND:") {
+                // Route multi-line terminal commands (e.g. python3 -c "..." or heredocs)
+                return parse_terminal_command(full_command, full_justification)
+                    .unwrap_or_else(|| Err(format!("Failed to parse terminal command: {}", full_command.lines().next().unwrap_or(full_command))));
             }
         }
 
@@ -284,7 +395,9 @@ pub fn parse_agent_action(action_json: &str) -> Result<AgentAction, String> {
             let skip_validation = command_part.starts_with("ALL_ELEMENTS") ||
                                  command_part.contains("ALL_ELEMENTS") ||
                                  command_part.starts_with("FULL_TEXT") ||
-                                 command_part.contains("FULL_TEXT");
+                                 command_part.contains("FULL_TEXT") ||
+                                 command_part.starts_with("BROWSER_CONSOLE") ||
+                                 command_part.contains("BROWSER_CONSOLE");
 
             // If reasoning is missing, warn but don't fail — use the command as-is
             // with a default reasoning to avoid killing the automation over formatting
@@ -319,6 +432,21 @@ pub fn parse_agent_action(action_json: &str) -> Result<AgentAction, String> {
 
                 return Ok(AgentAction {
                     action_type: ActionType::FullText,
+                    app_name: None,
+                    target_element: None,
+                    parameters: None,
+                    reasoning,
+                });
+            }
+            else if command_part == "BROWSER_CONSOLE" || command_part.starts_with("BROWSER_CONSOLE ") {
+                let reasoning = if !justification.is_empty() {
+                    justification
+                } else {
+                    "Checking browser console for JavaScript errors".to_string()
+                };
+
+                return Ok(AgentAction {
+                    action_type: ActionType::BrowserConsole,
                     app_name: None,
                     target_element: None,
                     parameters: None,
@@ -468,6 +596,10 @@ pub fn parse_agent_action(action_json: &str) -> Result<AgentAction, String> {
             else if command_part.starts_with("GOOGLE_SEARCH:") {
                 return parse_google_search_command(command_part, justification);
             }
+            // Fetch pages (parallel HTTP fetch)
+            else if command_part.starts_with("FETCH_PAGES:") {
+                return parse_fetch_pages_command(command_part, justification);
+            }
         }
     }
 
@@ -495,13 +627,80 @@ pub fn parse_agent_action(action_json: &str) -> Result<AgentAction, String> {
 }
 
 /// Parse CLICK command
+/// Supports single click: CLICK:30
+/// Supports multi-click chaining: CLICK:30:::CLICK:36 or CLICK:30:::36
 fn parse_click_command(command_part: &str, justification: String) -> Result<AgentAction, String> {
-    let element_id_str = command_part.replace("CLICK:", "").trim().to_string();
+    // Strip only the leading CLICK: prefix (not all occurrences)
+    let payload = command_part.trim_start_matches("CLICK:").trim();
 
-    // Extract just the number part (handle cases like "55 Link:..." or just "55")
-    let element_id = element_id_str.split_whitespace()
+    // Check for multi-click chaining via :::
+    // Handles: CLICK:30:::CLICK:36, CLICK:30:::36, CLICK:30 ::: CLICK:36
+    if payload.contains(":::") {
+        let mut element_paths = Vec::new();
+        let mut error_messages = Vec::new();
+
+        for part in payload.split(":::") {
+            // Strip optional "CLICK:" prefix from chained parts and trim spaces
+            let element_str = part.trim().trim_start_matches("CLICK:").trim();
+            let element_num = element_str.split_whitespace().next().unwrap_or(element_str);
+
+            match element_num.parse::<usize>() {
+                Ok(index) => {
+                    if let Some(element) = get_element_by_index(index) {
+                        #[cfg(target_os = "macos")]
+                        let element_path = element.path.clone();
+
+                        #[cfg(target_os = "windows")]
+                        let element_path = if let Some(ref_id) = element["element_ref"].as_str() {
+                            ref_id.to_string()
+                        } else {
+                            element["element_path"].as_str().unwrap_or("").to_string()
+                        };
+
+                        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                        let element_path = String::new();
+
+                        element_paths.push(element_path);
+                    } else {
+                        error_messages.push(format!("No element found at index {}", index));
+                    }
+                },
+                Err(_) => {
+                    error_messages.push(format!("Invalid element reference '{}'. Please use a number to reference an element from the list.", element_num));
+                }
+            }
+        }
+
+        if !error_messages.is_empty() {
+            return Err(error_messages[0].clone());
+        }
+        if element_paths.is_empty() {
+            return Err("No valid click targets found".to_string());
+        }
+
+        let app_state = get_app_state()
+            .ok_or("No application state available")?;
+        let app_name = app_state.current_app.clone().unwrap_or_default();
+
+        let reasoning = if !justification.is_empty() {
+            justification
+        } else {
+            format!("Clicking {} elements sequentially", element_paths.len())
+        };
+
+        return Ok(AgentAction {
+            action_type: ActionType::ClickElement,
+            app_name: Some(app_name),
+            target_element: Some(element_paths.join("|||")),
+            parameters: None,
+            reasoning,
+        });
+    }
+
+    // Single click — extract just the number part (handle cases like "55 Link:..." or just "55")
+    let element_id = payload.split_whitespace()
         .next()
-        .unwrap_or(&element_id_str)
+        .unwrap_or(payload)
         .to_string();
 
     // Try to parse as number (index)
@@ -744,40 +943,97 @@ fn parse_press_command(command_part: &str, justification: String) -> Result<Agen
     })
 }
 
-/// Parse EXCEL_TYPE command
+/// Sanitize LLM-produced JSON that contains common mistakes.
+/// Fixes bare alphanumeric values like `2025E` → `"2025E"` (invalid JSON numbers
+/// that are clearly intended as strings, e.g. "2025 Estimated").
+fn sanitize_llm_json(input: &str) -> String {
+    let re = regex::Regex::new(r#":\s*(\d+[A-Za-z]\w*)"#).unwrap();
+    let fixed = re.replace_all(input, |caps: &regex::Captures| {
+        let full = &caps[0];
+        let colon_and_space: String = full.chars().take_while(|&c| c == ':' || c.is_whitespace()).collect();
+        let bare_val = &caps[1];
+        format!("{}\"{}\"", colon_and_space, bare_val)
+    });
+    fixed.to_string()
+}
+
+/// Parse EXCEL_TYPE command - supports ||| separator (macOS), ::: separator (Windows), and JSON format
 fn parse_excel_type_command(command_part: &str, justification: String) -> Result<AgentAction, String> {
     let payload = command_part.trim_start_matches("EXCEL_TYPE:").trim();
 
-    // Parse cell:value pairs separated by :::
-    let mut cell_data = Vec::new();
-    for pair in payload.split(":::") {
-        let pair = pair.trim();
-        let mut parts = pair.splitn(2, ':');
+    let cell_data_str;
+    let cell_count;
 
-        if let (Some(cell), Some(value)) = (parts.next(), parts.next()) {
-            cell_data.push(format!("{}:{}", cell.trim(), value.trim()));
-        } else {
-            return Err(format!("Invalid cell:value pair format: '{}'", pair));
+    if payload.starts_with('{') {
+        // JSON format: {"A1": "Revenue", "B1": 2024, "A2": "=B1*0.6", ...}
+        // Validate then pass the JSON blob directly - the executor will parse it
+        let parsed = match serde_json::from_str::<serde_json::Value>(payload) {
+            Ok(json) => Ok((json, payload.to_string())),
+            Err(first_err) => {
+                // Try sanitizing common LLM JSON mistakes (bare values like 2025E)
+                let sanitized = sanitize_llm_json(payload);
+                match serde_json::from_str::<serde_json::Value>(&sanitized) {
+                    Ok(json) => {
+                        warn!("JSON required sanitization (bare values fixed): {}", first_err);
+                        Ok((json, sanitized))
+                    }
+                    Err(_) => Err(format!("Failed to parse JSON cell data: {}", first_err)),
+                }
+            }
+        };
+        match parsed {
+            Ok((json, json_str)) => {
+                cell_count = json.as_object().map(|o| o.len()).unwrap_or(0);
+                if cell_count == 0 {
+                    return Err("JSON cell data must be a non-empty object".to_string());
+                }
+                cell_data_str = json_str;
+            }
+            Err(e) => {
+                return Err(e);
+            }
         }
+    } else {
+        // Delimited format: detect ::: (Windows) or ||| (macOS) separator.
+        // Example: A1:Revenue:::B1:2024:::A2:=B1*0.6  or  A1:Revenue|||B1:2024|||A2:=B1*0.6
+        let separator = if payload.contains(":::") {
+            ":::"
+        } else {
+            "|||"
+        };
+        let mut cell_data = Vec::new();
+        for pair in payload.split(separator) {
+            let pair = pair.trim();
+            if pair.is_empty() { continue; }
+            let mut parts = pair.splitn(2, ':');
+
+            if let (Some(cell), Some(value)) = (parts.next(), parts.next()) {
+                cell_data.push(format!("{}:{}", cell.trim(), value.trim()));
+            } else {
+                return Err(format!("Invalid cell:value pair format: '{}'", pair));
+            }
+        }
+
+        if cell_data.is_empty() {
+            return Err("No valid cell:value pairs found for EXCEL_TYPE".to_string());
+        }
+        cell_count = cell_data.len();
+        // Always normalize stored cell_data to ||| internally; the executor splits on either.
+        cell_data_str = cell_data.join("|||");
     }
 
-    if cell_data.is_empty() {
-        return Err("No valid cell:value pairs found for EXCEL_TYPE".to_string());
-    }
-
-    // Store the cell data as a parameter
     let mut params = HashMap::new();
-    params.insert("cell_data".to_string(), cell_data.join(":::"));
+    params.insert("cell_data".to_string(), cell_data_str);
 
     let reasoning = if !justification.is_empty() {
         justification
     } else {
-        format!("Entering data into {} Excel cells", cell_data.len())
+        format!("Entering data into {} Excel cells", cell_count)
     };
 
     Ok(AgentAction {
         action_type: ActionType::ExcelType,
-        app_name: Some("Microsoft Excel".to_string()), // Default to Excel
+        app_name: Some("Microsoft Excel".to_string()),
         target_element: None,
         parameters: Some(params),
         reasoning,
@@ -853,6 +1109,21 @@ fn parse_excel_applescript_command(command_part: &str, justification: String) ->
     let mut params = HashMap::new();
     params.insert("command".to_string(), cmd_name.to_string());
 
+    // ||| chaining support: if the LLM chained multiple operations (e.g.
+    // EXCEL_BOLD:A1:D1|||A5:D5), pass the raw input through and let the
+    // execution layer split and handle each sub-command.
+    if params_str.contains("|||") {
+        params.insert("raw_input".to_string(), format!("{}:{}", cmd_name, params_str));
+        let reasoning = if !justification.is_empty() { justification } else { format!("Executing chained {} commands", cmd_name) };
+        return Some(Ok(AgentAction {
+            action_type: ActionType::ExcelCommand,
+            app_name: None,
+            target_element: None,
+            parameters: Some(params),
+            reasoning,
+        }));
+    }
+
     // Parse parameters based on command type
     match cmd_name {
         "EXCEL_RENAME_SHEET" => {
@@ -893,15 +1164,21 @@ fn parse_excel_applescript_command(command_part: &str, justification: String) ->
         "EXCEL_AUTOFIT_COLUMNS" | "EXCEL_BOLD" | "EXCEL_ITALIC" | "EXCEL_UNDERLINE" |
         "EXCEL_WRAP_TEXT" | "EXCEL_MERGE_CELLS" | "EXCEL_UNMERGE_CELLS" |
         "EXCEL_CLEAR_RANGE" | "EXCEL_GET_CELL_VALUE" | "EXCEL_GET_RANGE_VALUES" |
-        "EXCEL_GET_FORMULA" | "EXCEL_GET_RANGE_FORMULAS" => {
+        "EXCEL_GET_FORMULA" | "EXCEL_GET_RANGE_FORMULAS" | "EXCEL_FREEZE_PANES" => {
             // Format: COMMAND:range
             if params_str.is_empty() {
                 return Some(Err(format!("{} requires a range", cmd_name)));
             }
             params.insert("range".to_string(), params_str.to_string());
         },
-        "EXCEL_GET_SHEET_INFO" => {
+        "EXCEL_GET_SHEET_INFO" | "EXCEL_UNFREEZE_PANES" | "EXCEL_SAVE" | "EXCEL_NEW_WORKBOOK" => {
             // No parameters needed
+        },
+        "EXCEL_OPEN_WORKBOOK" | "EXCEL_SAVE_AS" => {
+            if params_str.is_empty() {
+                return Some(Err(format!("{} requires a file path", cmd_name)));
+            }
+            params.insert("path".to_string(), params_str.to_string());
         },
         "EXCEL_GET_STRUCTURE" => {
             // Format: EXCEL_GET_STRUCTURE:range (e.g., A1:P30)
@@ -1024,13 +1301,28 @@ fn parse_word_applescript_command(command_part: &str, justification: String) -> 
     let mut params = HashMap::new();
     params.insert("command".to_string(), cmd_name.to_string());
 
+    // ::: chaining support for Word insert commands
+    if params_str.contains(":::") {
+        params.insert("raw_input".to_string(), format!("{}:{}", cmd_name, params_str));
+        let reasoning = if !justification.is_empty() { justification } else { format!("Executing chained {} commands", cmd_name) };
+        return Some(Ok(AgentAction {
+            action_type: ActionType::WordCommand,
+            app_name: None,
+            target_element: None,
+            parameters: Some(params),
+            reasoning,
+        }));
+    }
+
     // Parse parameters based on command type
     match cmd_name {
         "WORD_NEW_DOCUMENT" | "WORD_CLOSE" |
-        "WORD_BOLD" | "WORD_ITALIC" | "WORD_UNDERLINE" | "WORD_DELETE" |
+        "WORD_BOLD" | "WORD_UNBOLD" | "WORD_ITALIC" | "WORD_UNITALIC" | 
+        "WORD_UNDERLINE" | "WORD_UNUNDERLINE" | "WORD_DELETE" |
         "WORD_GET_TEXT" | "WORD_GET_SELECTION" | "WORD_GET_SELECTION_FORMAT" | 
         "WORD_GET_FORMATTING" | "WORD_GET_WORD_COUNT" | "WORD_GET_DOCUMENT_INFO" | 
-        "WORD_SELECT_ALL" | "WORD_DESELECT" | "WORD_GOTO_START" | "WORD_GOTO_END" => {
+        "WORD_SELECT_ALL" | "WORD_DESELECT" | "WORD_RESET_FORMATTING" | 
+        "WORD_GOTO_START" | "WORD_GOTO_END" => {
             // No parameters needed
         },
         "WORD_OPEN" => {
@@ -1050,6 +1342,20 @@ fn parse_word_applescript_command(command_part: &str, justification: String) -> 
         "WORD_INSERT_PARAGRAPH" => {
             // Format: WORD_INSERT_PARAGRAPH:text (text is optional - empty creates blank line)
             params.insert("text".to_string(), params_str.to_string());
+        },
+        "WORD_INSERT_HEADING" => {
+            // Format: WORD_INSERT_HEADING:<size>:<text>
+            // Inserts a bold heading at given font size in one shot — replaces the
+            // SELECT→BOLD→SET_FONT_SIZE→DESELECT cycle.
+            let parts: Vec<&str> = params_str.splitn(2, ':').collect();
+            if parts.len() != 2 || parts[0].trim().is_empty() || parts[1].trim().is_empty() {
+                return Some(Err("WORD_INSERT_HEADING requires size:text (e.g. WORD_INSERT_HEADING:14:Section Title)".to_string()));
+            }
+            if parts[0].trim().parse::<f32>().is_err() {
+                return Some(Err(format!("WORD_INSERT_HEADING size must be numeric, got '{}'", parts[0].trim())));
+            }
+            params.insert("size".to_string(), parts[0].trim().to_string());
+            params.insert("text".to_string(), parts[1].to_string());
         },
         "WORD_FIND_REPLACE" => {
             // Format: WORD_FIND_REPLACE:find_text:replace_text
@@ -1473,4 +1779,117 @@ fn parse_google_search_command(command_part: &str, justification: String) -> Res
         parameters: Some(params),
         reasoning,
     })
+}
+
+/// Parse FETCH_PAGES command
+/// Format: FETCH_PAGES:<url1>,<url2>,... || justification
+fn parse_fetch_pages_command(command_part: &str, justification: String) -> Result<AgentAction, String> {
+    let urls_str = command_part.trim_start_matches("FETCH_PAGES:").trim();
+
+    if urls_str.is_empty() {
+        return Err("FETCH_PAGES requires at least one URL".to_string());
+    }
+
+    // Split by comma and filter to valid HTTP URLs, cap at 8
+    let urls: Vec<String> = urls_str
+        .split(',')
+        .map(|u| u.trim().to_string())
+        .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+        .take(8)
+        .collect();
+
+    if urls.is_empty() {
+        return Err("FETCH_PAGES requires valid HTTP URLs".to_string());
+    }
+
+    let mut params = HashMap::new();
+    params.insert("urls".to_string(), urls.join(","));
+
+    let reasoning = if !justification.is_empty() {
+        justification
+    } else {
+        format!("Fetching {} page(s)", urls.len())
+    };
+
+    Ok(AgentAction {
+        action_type: ActionType::FetchPages,
+        app_name: None,
+        target_element: None,
+        parameters: Some(params),
+        reasoning,
+    })
+}
+
+/// Parse WRITE_FILE multi-line block command
+/// Format:
+///   WRITE_FILE:<file_path>
+///   <content lines - any characters allowed>
+///   WRITE_FILE_END || justification
+///
+/// Returns Some(Result) if this is a WRITE_FILE command, None otherwise
+fn parse_write_file_command(action_json: &str) -> Option<Result<AgentAction, String>> {
+    // Find the WRITE_FILE: prefix
+    let wf_start = action_json.find("WRITE_FILE:")?;
+    let after_prefix = &action_json[wf_start + 11..]; // Skip "WRITE_FILE:"
+
+    // The file path is on the first line (up to the first newline)
+    let first_newline = after_prefix.find('\n');
+    let file_path = if let Some(nl_pos) = first_newline {
+        after_prefix[..nl_pos].trim().to_string()
+    } else {
+        // Single-line WRITE_FILE without content — error
+        return Some(Err("WRITE_FILE requires content after the file path (use multi-line format)".to_string()));
+    };
+
+    if file_path.is_empty() {
+        return Some(Err("WRITE_FILE requires a file path".to_string()));
+    }
+
+    let after_path = &after_prefix[first_newline.unwrap() + 1..];
+
+    // Find the WRITE_FILE_END marker
+    let (content, justification) = if let Some(end_pos) = after_path.find("WRITE_FILE_END") {
+        let content = &after_path[..end_pos];
+        // Remove trailing newline before WRITE_FILE_END if present
+        let content = content.strip_suffix('\n').unwrap_or(content);
+
+        // Extract justification after "WRITE_FILE_END"
+        let after_end = &after_path[end_pos + 14..]; // Skip "WRITE_FILE_END"
+        let justification = if let Some(pipe_pos) = after_end.find(" || ") {
+            after_end[pipe_pos + 4..].trim().to_string()
+        } else {
+            String::new()
+        };
+
+        (content.to_string(), justification)
+    } else {
+        // No WRITE_FILE_END marker — use rfind for " || " as fallback
+        // (in case LLM forgot the end marker but included justification)
+        if let Some(pipe_pos) = after_path.rfind(" || ") {
+            let content = after_path[..pipe_pos].trim_end().to_string();
+            let justification = after_path[pipe_pos + 4..].trim().to_string();
+            (content, justification)
+        } else {
+            // No end marker, no justification — treat everything as content
+            (after_path.to_string(), String::new())
+        }
+    };
+
+    let reasoning = if !justification.is_empty() {
+        justification
+    } else {
+        format!("Writing file: {}", file_path)
+    };
+
+    let mut params = HashMap::new();
+    params.insert("path".to_string(), file_path);
+    params.insert("content".to_string(), content);
+
+    Some(Ok(AgentAction {
+        action_type: ActionType::WriteFile,
+        app_name: None,
+        target_element: None,
+        parameters: Some(params),
+        reasoning,
+    }))
 }

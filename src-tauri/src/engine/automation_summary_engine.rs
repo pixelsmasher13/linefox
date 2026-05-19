@@ -172,21 +172,26 @@ async fn generate_nl_description_from_script(
             }
             key
         },
+        "openai-codex" => crate::auth::openai_codex_oauth::get_active_credentials(app_handle)
+            .await
+            .map_err(|e| format!("ChatGPT subscription auth: {}", e))?
+            .0,
+        "claude-subscription" => {
+            let key = app_handle
+                .db(|db| get_setting(db, "api_key_claude_oauth"))
+                .map(|s| s.setting_value)
+                .unwrap_or_default();
+            if key.is_empty() {
+                return Err("Claude OAuth token is not configured. Run `claude setup-token` and paste the token in Settings.".to_string());
+            }
+            key
+        },
         "grok" => {
             let key = app_handle
                 .db(|db| get_setting(db, "api_key_grok").expect("Failed to get Grok API key"))
                 .setting_value;
             if key.is_empty() {
                 return Err("Grok API key is not configured".to_string());
-            }
-            key
-        },
-        "deepseek" => {
-            let key = app_handle
-                .db(|db| get_setting(db, "api_key_deepseek").expect("Failed to get DeepSeek API key"))
-                .setting_value;
-            if key.is_empty() {
-                return Err("DeepSeek API key is not configured".to_string());
             }
             key
         },
@@ -302,6 +307,18 @@ Limit your response to exactly the steps, without introductions, conclusions or 
 
             Ok(response_text.trim().to_string())
         },
+        "openai-codex" => {
+            info!("Using ChatGPT subscription (Codex) for automation summary generation");
+            let (response_text, input_tokens, output_tokens) =
+                crate::engine::llm_providers::openai_codex::call_llm_api(
+                    &api_key, prompt, &system_prompt, 1000
+                ).await?;
+            info!(
+                "ChatGPT (Codex) token usage for summary - Input: {}, Output: {}",
+                input_tokens, output_tokens
+            );
+            Ok(response_text.trim().to_string())
+        },
         "grok" => {
             info!("Using Grok API for automation summary generation");
             let (response_text, input_tokens, output_tokens) =
@@ -311,20 +328,6 @@ Limit your response to exactly the steps, without introductions, conclusions or 
 
             info!(
                 "Grok token usage for summary - Input: {}, Output: {}",
-                input_tokens, output_tokens
-            );
-
-            Ok(response_text.trim().to_string())
-        },
-        "deepseek" => {
-            info!("Using DeepSeek API for automation summary generation");
-            let (response_text, input_tokens, output_tokens) =
-                crate::engine::llm_providers::deepseek::call_llm_api(
-                    &api_key, prompt, &system_prompt, 1000
-                ).await?;
-
-            info!(
-                "DeepSeek token usage for summary - Input: {}, Output: {}",
                 input_tokens, output_tokens
             );
 
@@ -601,21 +604,26 @@ async fn filter_events_with_llm(
             }
             key
         },
+        "openai-codex" => crate::auth::openai_codex_oauth::get_active_credentials(app_handle)
+            .await
+            .map_err(|e| format!("ChatGPT subscription auth: {}", e))?
+            .0,
+        "claude-subscription" => {
+            let key = app_handle
+                .db(|db| get_setting(db, "api_key_claude_oauth"))
+                .map(|s| s.setting_value)
+                .unwrap_or_default();
+            if key.is_empty() {
+                return Err("Claude OAuth token is not configured. Run `claude setup-token` and paste the token in Settings.".to_string());
+            }
+            key
+        },
         "grok" => {
             let key = app_handle
                 .db(|db| get_setting(db, "api_key_grok").expect("Failed to get Grok API key"))
                 .setting_value;
             if key.is_empty() {
                 return Err("Grok API key is not configured".to_string());
-            }
-            key
-        },
-        "deepseek" => {
-            let key = app_handle
-                .db(|db| get_setting(db, "api_key_deepseek").expect("Failed to get DeepSeek API key"))
-                .setting_value;
-            if key.is_empty() {
-                return Err("DeepSeek API key is not configured".to_string());
             }
             key
         },
@@ -844,15 +852,15 @@ Important:
                 &api_key, prompt.to_string(), &system_prompt, 8000
             ).await?
         },
-        "grok" => {
-            info!("Using Grok API for automation event filtering");
-            crate::engine::llm_providers::grok::call_llm_api(
+        "openai-codex" => {
+            info!("Using ChatGPT subscription (Codex) for automation event filtering");
+            crate::engine::llm_providers::openai_codex::call_llm_api(
                 &api_key, prompt.to_string(), &system_prompt, 8000
             ).await?
         },
-        "deepseek" => {
-            info!("Using DeepSeek API for automation event filtering");
-            crate::engine::llm_providers::deepseek::call_llm_api(
+        "grok" => {
+            info!("Using Grok API for automation event filtering");
+            crate::engine::llm_providers::grok::call_llm_api(
                 &api_key, prompt.to_string(), &system_prompt, 8000
             ).await?
         },

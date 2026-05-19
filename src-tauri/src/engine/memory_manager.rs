@@ -6,7 +6,7 @@
 //! - Configurable size limits
 //! - Context summarization support
 
-use log::info;
+use log::{info, warn};
 use std::sync::{Arc, Mutex};
 
 /// Memory limits for different modes
@@ -147,7 +147,7 @@ impl MemoryStore {
         let mut summary = String::new();
         if let Some(existing) = &self.compressed_summary {
             summary.push_str(existing);
-            summary.push('\n');
+            summary.push_str("\n");
         }
 
         // Group and summarize old entries
@@ -161,7 +161,7 @@ impl MemoryStore {
             // Keep first 200 chars of each, max 10 items in summary
             for (i, item) in data_items.iter().take(10).enumerate() {
                 let truncated = if item.len() > 200 {
-                    format!("{}...", &item[..200])
+                    format!("{}...", crate::engine::types::safe_truncate(&item, 200))
                 } else {
                     item.to_string()
                 };
@@ -234,8 +234,21 @@ lazy_static::lazy_static! {
 /// Initialize memory for a new automation run
 pub fn init_memory(agent_mode: bool) {
     let mut mem = MEMORY_STORE.lock().unwrap();
+    let prior_entries = mem.entries.len();
+    let prior_chars = mem.total_chars;
     *mem = MemoryStore::new(agent_mode);
-    info!("Memory initialized: agent_mode={}, limit={}", agent_mode, mem.max_chars);
+    if prior_entries > 0 || prior_chars > 0 {
+        warn!(
+            "🔬 MEM_DIAG WIPE (init_memory): destroyed {} entries / {} chars; new agent_mode={} limit={}\nbacktrace:\n{}",
+            prior_entries,
+            prior_chars,
+            agent_mode,
+            mem.max_chars,
+            std::backtrace::Backtrace::force_capture()
+        );
+    } else {
+        info!("Memory initialized: agent_mode={}, limit={}", agent_mode, mem.max_chars);
+    }
 }
 
 /// Save to memory (simple - just content)
@@ -255,13 +268,29 @@ pub fn get_memory_contents() -> String {
 /// Clear all memory
 pub fn clear_memory() {
     let mut mem = MEMORY_STORE.lock().unwrap();
+    let prior_entries = mem.entries.len();
+    let prior_chars = mem.total_chars;
     mem.clear();
+    if prior_entries > 0 || prior_chars > 0 {
+        warn!(
+            "🔬 MEM_DIAG WIPE (clear_memory): destroyed {} entries / {} chars\nbacktrace:\n{}",
+            prior_entries,
+            prior_chars,
+            std::backtrace::Backtrace::force_capture()
+        );
+    }
 }
 
 /// Get memory size
 pub fn get_memory_size() -> usize {
     let mem = MEMORY_STORE.lock().unwrap();
     mem.len()
+}
+
+/// Get number of raw entries currently in memory (excludes compressed summary)
+pub fn get_entry_count() -> usize {
+    let mem = MEMORY_STORE.lock().unwrap();
+    mem.entries.len()
 }
 
 /// Add orchestrator note (won't be compressed)

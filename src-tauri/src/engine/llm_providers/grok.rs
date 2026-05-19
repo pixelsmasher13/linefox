@@ -105,6 +105,7 @@ pub async fn call_llm_api_with_session(
         // Update session token counts
         session.total_input_tokens += response_body.usage.prompt_tokens;
         session.total_output_tokens += response_body.usage.completion_tokens;
+        session.api_calls += 1;
         
         // Add assistant response to session history
         session.messages.push(crate::engine::types::Message {
@@ -184,12 +185,21 @@ pub async fn call_llm_api(
             "Grok API token usage - Input: {}, Output: {}",
             response_body.usage.prompt_tokens, response_body.usage.completion_tokens
         );
-        
+
+        // Fold into active LLM_SESSION (or standalone tally if none).
+        crate::engine::usage_tracker::record_stateless_call(
+            "grok",
+            response_body.usage.prompt_tokens,
+            response_body.usage.completion_tokens,
+            0,
+            0,
+        );
+
         // Extract the text
         let response_text = response_body.choices.first()
             .ok_or_else(|| "Empty response from Grok API".to_string())
             .map(|choice| choice.message.content.trim().to_string())?;
-        
+
         Ok((response_text, response_body.usage.prompt_tokens, response_body.usage.completion_tokens))
     } else {
         let error_message = response

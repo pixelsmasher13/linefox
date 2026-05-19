@@ -38,7 +38,8 @@
       "icons/icon_128.png",
       "icons/icon_256.png",
       "icons/icon_512.png",
-      "icons/icon.icns"
+      "icons/icon.icns",
+      "icons/icon.ico"
     ],
     "resources": [
       "resources/**/*"

@@ -1,5 +1,23 @@
-use log::info;
+use log::{info, warn};
 use chrono::Local;
+use tauri::AppHandle;
+use serde::{Deserialize, Serialize};
+
+use crate::configuration::state::ServiceAccess;
+use crate::repository::task_extracted_data_repository::{
+    RecordSummary, get_memory_summary_for_planner, 
+    get_records_by_ids, get_records_by_type_for_planner
+};
+use crate::entity::task_extracted_data::TaskExtractedData;
+
+/// Tool call request from LLM for retrieving memory records
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryToolCall {
+    pub tool: String,  // "GET_RECORDS"
+    pub record_type: Option<String>,  // Filter by type
+    pub record_ids: Option<Vec<i64>>,  // Specific record IDs
+    pub limit: Option<i32>,  // Max records to return
+}
 
 #[derive(Debug)]
 pub struct ScriptGenerator {
@@ -11,6 +29,125 @@ impl ScriptGenerator {
     pub fn new(api_key: String, api_choice: String) -> Self {
         Self { api_key, api_choice }
     }
+    
+    /// Format memory summary for the planner prompt
+    fn format_memory_summary(summaries: &[RecordSummary], types: &[String], total_count: i64) -> String {
+        if summaries.is_empty() {
+            return "No stored data available.".to_string();
+        }
+
+        let mut output = String::new();
+        output.push_str(&format!("📦 STORED DATA MEMORY ({} total records)\n", total_count));
+        output.push_str(&format!("Available types: {}\n\n", types.join(", ")));
+        
+        if total_count > 100 {
+            output.push_str("(Showing most recent 100 records - use GET_RECORDS tool to retrieve specific types)\n\n");
+        }
+        
+        output.push_str("Recent records:\n");
+        for (i, summary) in summaries.iter().enumerate() {
+            output.push_str(&format!(
+                "  {}. [ID:{}] {} ({}) - {}\n",
+                i + 1,
+                summary.id,
+                summary.record_name,
+                summary.record_type,
+                summary.source_context.as_deref().unwrap_or("no context")
+            ));
+        }
+        
+        output
+    }
+    
+    /// Format retrieved records as context for the planner
+    fn format_retrieved_records(records: &[TaskExtractedData]) -> String {
+        if records.is_empty() {
+            return "No records retrieved.".to_string();
+        }
+        
+        let mut output = String::new();
+        output.push_str("📋 RETRIEVED RECORDS:\n\n");
+        
+        for record in records {
+            output.push_str(&format!("### {} ({})\n", record.record_name, record.record_type));
+            if let Some(ref ctx) = record.source_context {
+                output.push_str(&format!("Source: {}\n", ctx));
+            }
+            output.push_str(&format!("Data: {}\n\n", 
+                serde_json::to_string_pretty(&record.data).unwrap_or_else(|_| "{}".to_string())
+            ));
+        }
+        
+        output
+    }
+    
+    /// Parse tool call from LLM response
+    fn parse_tool_call(response: &str) -> Option<MemoryToolCall> {
+        // Look for GET_RECORDS tool call pattern
+        // Format: GET_RECORDS(type="contact", ids=[1,2,3], limit=10)
+        // or JSON format: {"tool": "GET_RECORDS", "record_type": "contact", ...}
+        
+        let response_trimmed = response.trim();
+        
+        // Try JSON format first
+        if response_trimmed.starts_with("{") && response_trimmed.contains("GET_RECORDS") {
+            if let Ok(tool_call) = serde_json::from_str::<MemoryToolCall>(response_trimmed) {
+                return Some(tool_call);
+            }
+            // Try to extract JSON from response
+            if let Some(start) = response_trimmed.find("{") {
+                if let Some(end) = response_trimmed.rfind("}") {
+                    let json_str = &response_trimmed[start..=end];
+                    if let Ok(tool_call) = serde_json::from_str::<MemoryToolCall>(json_str) {
+                        return Some(tool_call);
+                    }
+                }
+            }
+        }
+        
+        // Try simple format: GET_RECORDS:type=contact or GET_RECORDS:ids=1,2,3
+        if response_trimmed.starts_with("GET_RECORDS") {
+            let mut tool_call = MemoryToolCall {
+                tool: "GET_RECORDS".to_string(),
+                record_type: None,
+                record_ids: None,
+                limit: Some(20),
+            };
+            
+            // Parse parameters after GET_RECORDS
+            if let Some(params_start) = response_trimmed.find(':') {
+                let params_str = &response_trimmed[params_start + 1..];
+                for param in params_str.split(',') {
+                    let param = param.trim();
+                    if param.starts_with("type=") {
+                        tool_call.record_type = Some(param[5..].trim().trim_matches('"').to_string());
+                    } else if param.starts_with("ids=") {
+                        let ids_str = param[4..].trim().trim_matches(|c| c == '[' || c == ']');
+                        let ids: Vec<i64> = ids_str
+                            .split(',')
+                            .filter_map(|s| s.trim().parse().ok())
+                            .collect();
+                        if !ids.is_empty() {
+                            tool_call.record_ids = Some(ids);
+                        }
+                    } else if param.starts_with("limit=") {
+                        if let Ok(limit) = param[6..].trim().parse::<i32>() {
+                            tool_call.limit = Some(limit);
+                        }
+                    }
+                }
+            }
+            
+            // Only return if we have some filter criteria
+            if tool_call.record_type.is_some() || tool_call.record_ids.is_some() {
+                return Some(tool_call);
+            }
+        }
+        
+        None
+    }
+
+    /// Generate only NL description from a user prompt (skip script generation)
     /// Returns (empty_script, nl_description, generated_name)
     pub async fn generate_script_from_prompt(
         &self,
@@ -23,10 +160,151 @@ impl ScriptGenerator {
         // We're skipping script generation, so just return empty script
         let empty_script = "{}";
 
-        // Generate the NL description and name directly from the prompt
-        let (nl_description, generated_name) = self.generate_nl_description_and_name_from_prompt(prompt, name, installed_apps).await?;
+        // Generate the NL description and name directly from the prompt (without memory)
+        let (nl_description, generated_name) = self.generate_nl_description_and_name_from_prompt(prompt, name, installed_apps, None, None).await?;
 
         Ok((empty_script.to_string(), nl_description, generated_name))
+    }
+    
+    /// Generate NL description with memory access (planner can retrieve stored data)
+    /// Returns (empty_script, nl_description, generated_name)
+    /// Supports up to MAX_TOOL_CALLS rounds of GET_RECORDS before generating the plan
+    pub async fn generate_script_from_prompt_with_memory(
+        &self,
+        app_handle: &AppHandle,
+        prompt: &str,
+        name: &str,
+        installed_apps: &[String],
+    ) -> Result<(String, String, String), String> {
+        const MAX_TOOL_CALLS: usize = 2; // Max GET_RECORDS calls before forcing plan generation
+        
+        info!("Generating NL description with memory access from prompt: {}", prompt);
+
+        // Get memory summary from database
+        let (summaries, types, total_count) = app_handle
+            .db(|db| get_memory_summary_for_planner(db))
+            .map_err(|e| format!("Failed to get memory summary: {}", e))?;
+        
+        let memory_summary = if !summaries.is_empty() {
+            let formatted = Self::format_memory_summary(&summaries, &types, total_count);
+            info!("Memory summary being sent to planner:\n{}", formatted);
+            Some(formatted)
+        } else {
+            None
+        };
+        
+        info!("Memory: {} records, {} types: {:?}", total_count, types.len(), types);
+
+        // We're skipping script generation, so just return empty script
+        let empty_script = "{}";
+        
+        // Track all retrieved records across multiple tool calls
+        let mut all_retrieved_records: Vec<TaskExtractedData> = Vec::new();
+        let mut tool_call_count = 0;
+
+        // First LLM call - may return tool call or direct plan
+        let (mut current_response, generated_name) = self.generate_nl_description_and_name_from_prompt(
+            prompt, name, installed_apps, memory_summary.as_deref(), None
+        ).await?;
+        
+        info!("Planner initial response (first 300 chars): {}", 
+              current_response.chars().take(300).collect::<String>());
+        
+        // Tool call loop - allow up to MAX_TOOL_CALLS retrievals
+        while tool_call_count < MAX_TOOL_CALLS {
+            if let Some(tool_call) = Self::parse_tool_call(&current_response) {
+                tool_call_count += 1;
+                info!("Planner requested memory retrieval #{}: {:?}", tool_call_count, tool_call);
+                
+                // Execute the tool call
+                let new_records = self.execute_memory_tool_call(app_handle, &tool_call)?;
+                
+                if !new_records.is_empty() {
+                    info!("Retrieved {} records (total now: {})", 
+                          new_records.len(), 
+                          all_retrieved_records.len() + new_records.len());
+                    
+                    // Add to accumulated records (avoid duplicates by ID)
+                    for record in new_records {
+                        if !all_retrieved_records.iter().any(|r| r.id == record.id) {
+                            all_retrieved_records.push(record);
+                        }
+                    }
+                    
+                    // Format all retrieved records so far
+                    let retrieved_context = Self::format_retrieved_records(&all_retrieved_records);
+                    
+                    // Call LLM again with accumulated context
+                    // Add note about remaining tool calls
+                    let remaining_calls = MAX_TOOL_CALLS - tool_call_count;
+                    let context_with_note = if remaining_calls > 0 {
+                        format!("{}\n\n(You can make {} more GET_RECORDS call(s) if needed, or provide your plan now)", 
+                                retrieved_context, remaining_calls)
+                    } else {
+                        format!("{}\n\n(No more GET_RECORDS calls available - please provide your plan now)", 
+                                retrieved_context)
+                    };
+                    
+                    let (response, _) = self.generate_nl_description_and_name_from_prompt(
+                        prompt, name, installed_apps, memory_summary.as_deref(), Some(&context_with_note)
+                    ).await?;
+                    
+                    current_response = response;
+                } else {
+                    // No records found, break and use current response
+                    info!("No records found for tool call, proceeding with plan generation");
+                    break;
+                }
+            } else {
+                // No tool call detected, we have our final response
+                break;
+            }
+        }
+        
+        // If we exhausted tool calls and still getting tool requests, force plan
+        if tool_call_count >= MAX_TOOL_CALLS && Self::parse_tool_call(&current_response).is_some() {
+            warn!("Max tool calls ({}) reached, forcing plan generation with accumulated data", MAX_TOOL_CALLS);
+            
+            if !all_retrieved_records.is_empty() {
+                let retrieved_context = Self::format_retrieved_records(&all_retrieved_records);
+                let final_context = format!("{}\n\n⚠️ MAX TOOL CALLS REACHED - You MUST provide your plan now using the data above.", 
+                                           retrieved_context);
+                
+                let (response, _) = self.generate_nl_description_and_name_from_prompt(
+                    prompt, name, installed_apps, memory_summary.as_deref(), Some(&final_context)
+                ).await?;
+                
+                current_response = response;
+            }
+        }
+
+        Ok((empty_script.to_string(), current_response, generated_name))
+    }
+    
+    /// Execute a memory tool call and retrieve records
+    fn execute_memory_tool_call(
+        &self,
+        app_handle: &AppHandle,
+        tool_call: &MemoryToolCall,
+    ) -> Result<Vec<TaskExtractedData>, String> {
+        let limit = tool_call.limit.unwrap_or(20).min(50); // Cap at 50 records
+        
+        // If specific IDs requested, fetch those
+        if let Some(ref ids) = tool_call.record_ids {
+            let limited_ids: Vec<i64> = ids.iter().take(50).copied().collect();
+            return app_handle
+                .db(|db| get_records_by_ids(db, &limited_ids))
+                .map_err(|e| format!("Failed to get records by IDs: {}", e));
+        }
+        
+        // If type requested, fetch by type
+        if let Some(ref record_type) = tool_call.record_type {
+            return app_handle
+                .db(|db| get_records_by_type_for_planner(db, record_type, limit))
+                .map_err(|e| format!("Failed to get records by type: {}", e));
+        }
+        
+        Ok(Vec::new())
     }
 
     /// Generate NL description and name directly from user prompt
@@ -35,6 +313,8 @@ impl ScriptGenerator {
         prompt: &str,
         _name: &str,  // Keep for compatibility but we'll generate our own
         installed_apps: &[String],
+        memory_summary: Option<&str>,
+        retrieved_records: Option<&str>,
     ) -> Result<(String, String), String> {
         // Build the apps list section for the system prompt
         let apps_section = if !installed_apps.is_empty() {
@@ -51,18 +331,36 @@ impl ScriptGenerator {
         // Get current date for context
         let current_date = Local::now().format("%A, %B %d, %Y").to_string();
 
-        // Dynamic CLI tools from startup probe
+        // Dynamic CLI tools from startup probe — substituted directly to avoid named/positional arg ordering issues
         let cli_tools_section = crate::engine::cli_probe::get_cached_tools_str()
-            .unwrap_or_else(|| String::from("\nAVAILABLE CLI TOOLS (pre-approved): git, npm, pip, cargo, brew, node, python3\n"));
+            .unwrap_or_else(|| String::from("AVAILABLE CLI TOOLS (pre-approved): git, npm, pip, cargo, brew, node, python3"));
+
+        // Resolve full path to Linefox directory so LLM knows the exact path
+        let linefox_dir = dirs::home_dir()
+            .map(|h| h.join("Linefox").to_string_lossy().to_string())
+            .unwrap_or_else(|| "{linefox_dir}".to_string());
 
         // System prompt that balances specificity with conciseness
         let system_prompt = format!(r#"You are an expert agent script writer.
-Your job is to create a workflow script that a less powerful LLM will follow that will lead to HIGH QUALITY COMPLETION OF USER's REQUEST. Create a clear numbered list of steps for the given task, and provide a concise name for the task.
+Your job is to create a workflow plan that an executing LLM will follow to achieve HIGH QUALITY COMPLETION OF USER's REQUEST. Create a clear numbered list of steps for the given task, and provide a concise name for the task.
 
 OUTPUT FORMAT:
-First line: NAME: <concise 2-5 word name for the taks>
+Option A — If the task requires computer actions (browsing, apps, terminal, files):
+First line: NAME: <concise 2-5 word name for the task>
 Then a blank line
 Then the numbered steps
+
+Option B — If the task is a GREETING, FACTUAL QUESTION, CALCULATION, or CONVERSATION answerable from general knowledge WITHOUT any computer action:
+First line: DIRECT_RESPONSE
+Second line: NAME: <concise 2-5 word name>
+Then a blank line
+Then write the actual response/answer to the user's request directly (no steps needed).
+Examples of when to use DIRECT_RESPONSE:
+- "Hi there" → greeting, just respond
+- "What is the founding date of the US?" → factual, just answer
+- "What's 15% of 230?" → calculation, just compute
+- "Explain quantum computing" → knowledge, just explain
+Do NOT use DIRECT_RESPONSE when the user wants CURRENT/LIVE data (stock prices, news, weather) or wants actions performed (send email, open app, etc.).
 
 NAME RULES:
 - 2-5 words maximum
@@ -71,60 +369,64 @@ NAME RULES:
 - Avoid generic names like "Web Task" or "Browser Task"
 - Don't include punctuation or special characters
 
-CRITICAL RULES:
-1. OUTPUT APPS: Only use apps (Excel, Word, etc.) when the user EXPLICITLY asks to use them OR when it's clearly sensible for the task. Collected data in memory is automatically shown to the user at completion so you don't have to save collected data unless user explicitly instructs you to.
-2. SPECIFY EXACT application names from the available apps list when needed, STRONGLY prefer most popular apps (e.g., Chrome over Firefox, Gmail over other email clients, Microsoft Office over alternatives)
-3. Be specific about UI elements and actions but skip obvious intermediate steps
-4. Combine navigation and action when sensible (e.g., "Navigate to google.com and search for...")
-5. Include exact URLs, button names, and field labels when certain they exist
-6. One main action per step - be clear and direct
-7. NEVER include login/authentication steps - the system handles those automatically via takeover when needed
-8. Current Date: {}. Take today's date /year into account if there is date explicitly or implicitly embedded in the user request 
+PLAN RULES:
+1. INTENT, NOT MECHANICS: Describe the goal of each step. The executor sees the live screen and chooses how. ✓ "Filter results to show only nonstop flights" / ✗ "Click the 'Stops' dropdown and select 'Nonstop only'". Never assume exact button positions, page layouts, or features that may not exist.
+2. CHECKPOINTS, NOT KEYSTROKES: One meaningful action per step — a verifiable checkpoint, not a single click. Steps should say WHAT to accomplish, not micro-manage HOW.
+3. APP CHOICE: Only direct the user to apps (Excel, Word, etc.) when EXPLICITLY asked or clearly sensible — collected memory data is auto-shown at completion, so don't save it unless instructed. Prefer popular apps from the available list (Chrome over Firefox, Gmail over alternatives, Microsoft Office over others). Use exact app names.
+4. DON'T OVER-SCRIPT THE BROWSER: For stable sources (finance.yahoo.com, stockanalysis.com, macrotrends.net, wikipedia.org, github.com, npmjs.com), name the source — "Get latest COIN financials from finance.yahoo.com and stockanalysis.com" — instead of scripting clicks. The executor has a parallel HTTP fetcher (~3s for up to 8 URLs). For SEC filings, news, paywalled or JS-heavy pages, say "Google X" or "find X" and let the executor browser-search.
+5. URLS ARE STARTING POINTS: Use known URLs when helpful but don't prescribe page layouts or whether to use browser vs direct fetch. For common patterns (search, filter, sort, export, navigate to settings), name the pattern not the element: ✓ "Use the search functionality" / ✗ "Click the magnifying glass icon in the header".
+6. LONG DOCUMENTS: For 10-Ks, articles, reports — say "Request full text" instead of scrolling page by page.
+7. SKIP LOGIN: Never include login/credential/sign-in steps — the system handles auth automatically via takeover. Start your plan after any login would occur.
+8. CURRENT DATE: {}. Account for explicit or implicit time references in the user's request.
+9. TERMINAL/CODE TASKS: Describe the goal, not exact commands. The executor resolves paths, flags, and tools at runtime. ✓ "Find the project and run its build" / ✗ "Run 'cd {linefox_dir}/myproject && npm run build'" (hardcoded paths break when the project moves).
+10. AVOID THESE ANTI-PATTERNS:
+    ✗ "Click the blue 'Apply Filters' button" or "the three-dot menu next to the avatar" (assumes layout)
+    ✗ "Select 'Advanced Search' from the dropdown" (assumes feature exists)
+    ✗ "Open Terminal and type..." (executor runs commands directly — never open Terminal.app)
+    ✗ "Copy the jokes to clipboard" / "Paste the content" (use "Extract to memory" / "Type from memory")
 
 EXCEL & WORD - DON'T OVER-SPECIFY:
 - The executor has access to SPECIAL INPUT AND FORMATTING COMMANDS for Excel and Word
 - DO say WHAT to include: "Add the collected data to Excel with headers" or "Format the document professionally"
-- Example: ✓ "Enter the data into Excel" NOT ✗ "Put title in Cell C1 or "Change headers in row 1, data starting row 2, bold the headers, add borders" 
+- Example: ✓ "Enter the data into Excel" NOT ✗ "Put title in Cell C1" or "Change headers in row 1, data starting row 2, bold the headers, add borders"
 
 TERMINAL COMMANDS (macOS) - DIRECT EXECUTION:
 - The executor has DIRECT TERMINAL ACCESS via TERMINAL_RUN command - NO NEED to open Terminal.app!
-- For git, npm, pip, cargo, shell commands: Simply say "Run git clone <url>" or "Run npm install"
-- ✓ GOOD: "Run 'git clone https://github.com/user/repo'" (direct terminal execution)
-- ✗ BAD: "Open Terminal, type 'cd ~', press Enter, type 'git clone...'" (unnecessary UI automation)
-- The executor handles working directories automatically (defaults to ~/Linefox)
+- ⚠️ NEVER say "Open Terminal" or "Launch Terminal" — the executor runs commands DIRECTLY without any app!
+- For terminal tasks: Describe the GOAL, not the exact command. The executor resolves paths, flags, and tools at runtime.
+- ✓ GOOD: "Find the project's package.json and run the build from that directory"
+- ✓ GOOD: "Clone the repo if it doesn't already exist locally, then check its current state"
+- ✓ GOOD: "Install dependencies and start the dev server in background"
+- ✗ BAD: "Run 'cd {linefox_dir}/myproject && npm run build'" (hardcodes path — what if the project is elsewhere?)
+- ✗ BAD: "Open Terminal, navigate to {linefox_dir}/project" (opens Terminal.app UI — WRONG!)
+- The executor handles working directories automatically (defaults to {linefox_dir})
 - For long-running commands (servers, watchers): Say "Start the dev server in background"
+- ⚠️ Commands must be single-line — never use heredocs (<<EOF) or multiline commands
 
-⚠️ AVOID SLOW COMMANDS - Commands timeout after 15 minutes!
-- ✓ GOOD: "ls ~/Linefox" or "find ~/Linefox -name '*project*'" (search specific directories)
-- ALL code files are stored in ~/Linefox by default - search there first, not ~
+FILE LOCATIONS:
+- ALL code files are stored in {linefox_dir} by default - search there first, not ~
+- ✓ GOOD: "List projects in {linefox_dir}" or "Find the project matching '<name>' in {linefox_dir}"
 
-{cli_tools}
+{}
 
 ⚠️ CLAUDE CLI SESSION & PERMISSION MANAGEMENT - CRITICAL:
 Each 'claude "prompt"' starts a NEW session with NO memory of previous commands!
 
 ⚠️ IMPORTANT: Claude CLI commands must START with "claude" - no cd prefix!
-The default working directory is ~/Linefox. Include a specific path in your prompt if needed.
+The default working directory is {linefox_dir}. Include the project path in your prompt.
 
 SESSION: Use --continue for follow-up commands to maintain context.
 PERMISSIONS: File write permissions and bash access are granted automatically — do NOT add --permission-mode.
 
 Without --continue, Claude forgets previous context.
 
-Example Claude workflow in steps:
-1. Run 'claude -p "implement user authentication in ~/myproject"' (starts session)
-2. Run 'claude -p --continue "now write the code to files"' (continues SAME session)
-3. Run 'git add . && git commit -m "Add auth feature"' (commit changes)
+When user mentions code review, debugging, or asks for AI help with code, consider using Claude CLI!
 
-When user mentions code review, debugging, or asks for AI help with code, consider using these CLI tools!
-
-CODING TASKS - LOCAL REPO AWARENESS (CRITICAL):
-When the user asks to modify, update, fix, or work with a repository/project:
-1. FIRST: Run 'ls ~/Linefox' to see what projects already exist locally
-2. If repo/project exists locally: Run 'git -C ~/Linefox/<repo> status' and 'git -C ~/Linefox/<repo> branch' to understand current state (dirty tree? current branch? unpushed commits?)
-3. If repo does NOT exist locally: THEN clone from GitHub with 'git clone <url> ~/Linefox/<repo>'
-4. NEVER clone a repo that already exists in ~/Linefox — always work with the local copy
-5. When user says "this repo" or "my project" without specifying a name, list ~/Linefox first to identify it
+CODING TASKS:
+- Projects are in {linefox_dir}. ALWAYS create a NEW project folder unless the user EXPLICITLY names an existing project to work or this task is continuing the previous task (i.e. you have a history of your previous actions as part of this task)
+- The executor has a WRITE_FILE command for small one-off files (single HTML page, config, simple script)
+- For projects/multi-file work: use Claude/OpenAI CLI (faster, reasons about code)
+- NEVER plan UI-based file creation (open TextEdit, type content, save)
 
 OCCAM'S RAZOR - SIMPLEST PATH FIRST:
 - For public documents (academic articles, blogs, 10-Ks): Google it first!
@@ -136,23 +438,7 @@ SIMPLE LOOKUP RULE:
 • Factual questions, rankings, prices, "best X in Y" → 2-3 steps MAX. Google it, extract the answer.
 • Try Google first. Only navigate to specialized sites (FIDE, ESPN, stock exchanges) if the user asks or the info isn't in search results.
 • If the answer appears on a Google results page or the first link, do NOT build a multi-site research workflow.
-(See Examples 7 & 8 below for exactly how short these plans should be.)
-
-UI ELEMENT GUIDELINES (PREVENT WILD GOOSE CHASES):
-- For COMMON/STANDARD elements: Be specific (e.g., "Click the search button", "Enter text in the search box")
-- For UNCERTAIN elements: Use GENERIC descriptions:
-  ✓ "Look for filters or sorting options" (not "Click the 'Advanced Filters' dropdown")
-  ✓ "Find and click the submit/continue button" (not "Click the blue 'Next Step' button")
-  ✓ "Navigate to settings/preferences" (not "Click the gear icon in top-right corner")
-- NEVER specify:
-  - Exact positions unless absolutely certain (avoid "top-right", "bottom-left")
-  - Features that may not exist (avoid "Click Advanced Options" unless you KNOW it exists)
-- When unsure, describe the INTENT not the specific element:
-  ✓ "Search for 'machine learning'" (intent clear, method flexible)
-  ✗ "Click the magnifying glass icon in the header" (too specific if uncertain)
-- UNCERTAIN elements: Be generic ("Look for filters or sorting options")
-- Describe INTENT not specific elements: "Search for 'X'" not "Click the magnifying glass"
-- For long documents (10-K filings, articles, reports): Say "Request full text to read the document" - this is faster than scrolling page by page
+(See Example 4 below for exactly how short these plans should be.)
 
 HIGH-QUALITY OUTPUT PRINCIPLE:
 - Quality over quantity — a few great results beats many mediocre ones
@@ -188,85 +474,97 @@ DATA COLLECTION STYLE:
 GOOD EXAMPLES:
 
 Example 1 - User asks: "Find the best productivity tips from Reddit"
-1. Navigate to reddit.com and search for 'best productivity tips'
-2. Sort results by relevance, click the first highly-upvoted post and extract key tips to memory
-3. Go back and check 2-3 more top posts, extract any additional valuable tips to memory
+1. Navigate to reddit.com and search for "best productivity tips"
+2. Open the top 2-3 highly-upvoted posts and extract key tips to memory
 
-Example 2 - User asks: "Research top AI tools and save to Excel"
-1. Google 'best AI tools 2026', open the first reputable source (TechCrunch, The Verge, etc.)
-2. Extract the top 10 AI tools with descriptions and pricing to memory
-3. Open Excel, create headers (Tool Name, Description, Pricing), type the tools from memory, save as 'AI_Tools_Research.xlsx'
+Example 2 - User asks: "Find me 10 Airbnb houses with a pool, Oct 25–27 in Maui" (request date: Jan 1, 2026)
+1. Navigate to airbnb.com, search for Maui with check-in Oct 25 and check-out Oct 27 2026
+2. Filter to include pool amenity
+3. Open each of the first 10 listings and extract key details to memory: pricing (nightly rate, total), location, pool type, standout amenities, and guest rating
+4. After reviewing 10 listings, verify memory contains data for all 10
 
-Example 3 - User asks: "Find me 10 Airbnb houses with a pool, Oct 25–27 in Maui" (request date: Jan 1, 2026)
-1. Navigate to airbnb.com, enter "Maui" as destination, set check-in Oct 25 and check-out Oct 27 2026, click Search
-2. Use filters to add "Pool" as an amenity
-3. Click the first listing (use the AXLINK element — if nothing opens, you clicked the map; try the text link)
-4. Review details and extract: name, location, price/night, bedrooms/bathrooms, pool type, host rating to memory
-5. Click back and repeat steps 3–4 for listings 2 through 10
-
-Example 4 - User asks: "Clone the top trending repo from GitHub and show me its README"
-1. Run 'ls ~/Linefox' to check existing repos; navigate to github.com/trending
-2. Identify the top repo and run 'git clone <url> ~/Linefox/<repo-name>' (skip if already exists)
-3. Run 'cat ~/Linefox/<repo-name>/README.md' and extract key purpose/setup info to memory
-
-Example 5 - User asks: "Review my project / implement a feature / fix a bug with Claude"
+Example 3 - User asks: "Review my project / implement a feature / fix a bug with Claude"
 (Covers: code review, feature implementation, responsive design, bug fixes — any Claude CLI coding task)
-1. Run 'ls ~/Linefox' to identify the project; run 'git -C ~/Linefox/<project> status && git branch' to check state
-2. Run 'claude -p "<task description> in ~/Linefox/<project>"' (permissions granted automatically)
-3. Run 'claude -p --continue "verify changes are complete and correct"' (same session)
-4. Run 'git -C ~/Linefox/<project> add . && git commit -m "<summary>"' to commit
+1. Find the project in {linefox_dir} and check its git status and current branch
+2. Use Claude CLI to implement the requested changes (include the project path in the prompt)
+3. Use Claude CLI --continue to verify the changes are complete
+4. Commit the changes with a descriptive message
 5. Extract summary of changes to memory
 
-Example 6 - User asks: "Set up a new project"
-1. Run 'ls ~/Linefox' to avoid name conflicts
-2. Run the appropriate scaffold command (e.g. 'npx create-react-app ~/Linefox/my-app' or 'cargo new ~/Linefox/my-app')
-3. Run the dev server in background; extract the local URL to memory
-
-Example 7 - User asks: "Find the highest-rated chess player in the world"
+Example 4 - User asks: "Find the highest-rated chess player in the world"
 1. Google "highest rated chess player 2026" and read the search results page
 2. Extract the player's name, rating, and country to memory
 (The results page shows the answer directly — no need to navigate to FIDE.)
-
-Example 8 - User asks: "Find the best hotel in Boston" / "What's Tesla's stock price?"
-1. Google the query and read the results page or first link
-2. Extract the top 2-3 options (or the direct answer) with key details to memory
-(For rankings, prices, stats: one Google search is enough. Do not build a multi-site workflow.)
-
-GOOD GENERIC EXAMPLES (when UI is uncertain):
-✓ "Look for sorting or filtering options to show top/relevant results"
-✓ "Find and use the search functionality"
-✓ "Navigate to settings or preferences section"
-✓ "Look for export, download, or save options"
-✓ "Find the main content area and extract relevant information"
-✓ "Go back to previous page" (instead of "Click the back arrow button")
-
-BAD EXAMPLES (never include these):
-✗ "Copy the jokes to clipboard" (use "Extract to memory" instead)
-✗ "Paste the content" (use "Type from memory" instead)
-✗ "Select all and copy" (use "Extract to memory" instead)
-✗ "Enter your email in the 'Email' field" (authentication handled automatically)
-✗ "Type your password" (authentication handled automatically)
-✗ "Click Sign in" (authentication handled automatically)
-✗ "Click the blue 'Apply Filters' button in the sidebar" (too specific - color/location may not exist)
-✗ "Click the three-dot menu icon next to the profile picture" (assumes specific UI exists)
-✗ "Select 'Advanced Search' from the dropdown menu" (assumes feature exists)
-✗ "Click the back arrow button in top-left" (too specific - say "Go back to previous page")
-✗ "Scroll down and look at the 5th comment" (too prescriptive - say "Read through top comments")
-✗ "Open Terminal application and type 'git clone...'" (use direct terminal: "Run 'git clone...'")
-✗ "Navigate to home directory and run npm install" (just say "Run 'npm install'" - cwd is automatic)
 
 REPETITIVE TASKS:
 - Be explicit about completion conditions
 - "Repeat steps 4-7 for each search result until 10 items collected or no more results"
 - "Process each LinkedIn profile with 'Director' or 'VP' in title"
+- For multi-item collection tasks (5+ items): end the plan with a verification step like "After reviewing N items, verify memory contains data for all N". Skip this for simple lookups or single-item tasks.
+{}
+{}
 
-Output the NAME line, then a blank line, then the numbered steps. No other text."#, current_date, cli_tools = cli_tools_section);
-
-        // Build user prompt
-        let user_prompt = format!(
-            "Task: {}\n\nCreate workflow steps for this objective. Be specific about applications and actions.",
-            prompt
+Output the NAME line, then a blank line, then the numbered steps. No other text."#, current_date, apps_section, cli_tools_section, 
+            // Add memory section if available
+            if memory_summary.is_some() || retrieved_records.is_some() {
+                let mut memory_section = String::new();
+                memory_section.push_str("\n\n═══════════════════════════════════════════\n");
+                memory_section.push_str("📚 STORED DATA MEMORY ACCESS\n");
+                memory_section.push_str("═══════════════════════════════════════════\n\n");
+                
+                memory_section.push_str("You have access to previously collected data from past tasks. This data can be used in your plan.\n\n");
+                
+                memory_section.push_str("TOOL: GET_RECORDS\n");
+                memory_section.push_str("Use this tool to retrieve stored records BEFORE generating your plan.\n\n");
+                memory_section.push_str("Format: GET_RECORDS:type=<type>,limit=<number>\n");
+                memory_section.push_str("   OR: GET_RECORDS:ids=<id1>,<id2>,<id3>\n\n");
+                memory_section.push_str("Examples:\n");
+                memory_section.push_str("  GET_RECORDS:type=contact,limit=10\n");
+                memory_section.push_str("  GET_RECORDS:ids=5,12,18\n");
+                memory_section.push_str("  GET_RECORDS:type=financial_report\n\n");
+                
+                memory_section.push_str("WHEN TO USE GET_RECORDS:\n");
+                memory_section.push_str("- If the task involves data you've collected before (contacts, products, research)\n");
+                memory_section.push_str("- If the user references previous work (e.g., 'use those contacts', 'that company info')\n");
+                memory_section.push_str("- If having existing data would make the task faster/better\n\n");
+                
+                memory_section.push_str("HOW TO USE RETRIEVED DATA IN YOUR PLAN:\n");
+                memory_section.push_str("- Reference the data directly: 'Using the contact emails from stored memory...'\n");
+                memory_section.push_str("- The executor can access this data during execution\n\n");
+                
+                if let Some(summary) = memory_summary {
+                    memory_section.push_str("═══════════════════════════════════════════\n");
+                    memory_section.push_str(&summary);
+                    memory_section.push_str("\n═══════════════════════════════════════════\n");
+                }
+                
+                if retrieved_records.is_some() {
+                    memory_section.push_str("\n⚠️ RETRIEVED DATA IS PROVIDED BELOW - Use it in your plan!\n");
+                }
+                
+                memory_section
+            } else {
+                String::new()
+            }
         );
+
+        // Build user prompt with optional retrieved records
+        let user_prompt = if let Some(records) = retrieved_records {
+            format!(
+                "Task: {}\n\n{}\n\nUsing the retrieved data above, create workflow steps for this objective. Reference the stored data where appropriate.",
+                prompt, records
+            )
+        } else {
+            format!(
+                "Task: {}\n\nCreate workflow steps for this objective. Be specific about applications and actions.{}",
+                prompt,
+                if memory_summary.is_some() {
+                    "\n\nNote: If this task could benefit from stored data (see STORED DATA MEMORY above), respond ONLY with a GET_RECORDS tool call first. Otherwise, provide the NAME and numbered steps."
+                } else {
+                    ""
+                }
+            )
+        };
 
         // Call the appropriate LLM API
         let response_text = match self.api_choice.as_str() {
@@ -294,18 +592,18 @@ Output the NAME line, then a blank line, then the numbered steps. No other text.
                     ).await?;
                 response_text
             },
-            "grok" => {
-                info!("🔑 Using Grok API for NL description and name");
+            "openai-codex" => {
+                info!("🔑 Using ChatGPT subscription (Codex) for NL description and name");
                 let (response_text, _input_tokens, _output_tokens) =
-                    crate::engine::llm_providers::grok::call_llm_api(
+                    crate::engine::llm_providers::openai_codex::call_llm_api(
                         &self.api_key, user_prompt, &system_prompt, 1500
                     ).await?;
                 response_text
             },
-            "deepseek" => {
-                info!("🔑 Using DeepSeek API for NL description and name");
+            "grok" => {
+                info!("🔑 Using Grok API for NL description and name");
                 let (response_text, _input_tokens, _output_tokens) =
-                    crate::engine::llm_providers::deepseek::call_llm_api(
+                    crate::engine::llm_providers::grok::call_llm_api(
                         &self.api_key, user_prompt, &system_prompt, 1500
                     ).await?;
                 response_text
@@ -320,21 +618,43 @@ Output the NAME line, then a blank line, then the numbered steps. No other text.
             }
         };
 
-        // Parse the response to extract name and steps
+        // Parse the response to extract name and steps (or direct response)
         let response_trimmed = response_text.trim();
         let lines: Vec<&str> = response_trimmed.lines().collect();
 
-        // Extract the name from the first line
+        // Check for DIRECT_RESPONSE format (no execution needed)
+        let is_direct_response = !lines.is_empty() && lines[0].trim().eq_ignore_ascii_case("DIRECT_RESPONSE");
+
+        if is_direct_response {
+            // Format: DIRECT_RESPONSE\nNAME: <name>\n\n<response body>
+            let generated_name = lines.iter()
+                .find(|l| l.starts_with("NAME:"))
+                .map(|l| l.strip_prefix("NAME:").unwrap_or("").trim().to_string())
+                .unwrap_or_else(|| prompt.split_whitespace().take(4).collect::<Vec<_>>().join(" "));
+
+            let response_body = lines.iter()
+                .skip_while(|l| l.trim().eq_ignore_ascii_case("DIRECT_RESPONSE") || l.starts_with("NAME:") || l.trim().is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_string();
+
+            info!("Direct response detected - name: {}, body length: {}", generated_name, response_body.len());
+
+            // Prefix with DIRECT_RESPONSE: so the caller can detect it
+            let prefixed = format!("DIRECT_RESPONSE:{}", response_body);
+            return Ok((prefixed, generated_name));
+        }
+
+        // Normal plan format: NAME: <name>\n\n<steps>
         let generated_name = if !lines.is_empty() && lines[0].starts_with("NAME:") {
             lines[0].strip_prefix("NAME:").unwrap_or("").trim().to_string()
         } else {
-            // Fallback to using first words of prompt if parsing fails
             prompt.split_whitespace().take(4).collect::<Vec<_>>().join(" ")
         };
 
-        // Extract the steps (everything after the name line and blank line)
         let nl_description = if lines.len() > 2 {
-            // Skip the NAME line and any blank lines, join the rest
             lines.iter()
                 .skip_while(|line| line.starts_with("NAME:") || line.trim().is_empty())
                 .cloned()
@@ -343,7 +663,6 @@ Output the NAME line, then a blank line, then the numbered steps. No other text.
                 .trim()
                 .to_string()
         } else {
-            // Fallback to full response if parsing fails
             response_trimmed.to_string()
         };
 
@@ -382,18 +701,18 @@ Output the NAME line, then a blank line, then the numbered steps. No other text.
                     ).await?;
                 response_text
             }
-            "grok" => {
-                info!("🔑 Using Grok API for continuation plan");
+            "openai-codex" => {
+                info!("🔑 Using ChatGPT subscription (Codex) for continuation plan");
                 let (response_text, _input_tokens, _output_tokens) =
-                    crate::engine::llm_providers::grok::call_llm_api(
+                    crate::engine::llm_providers::openai_codex::call_llm_api(
                         &self.api_key, user_prompt.clone(), system_prompt, 1500
                     ).await?;
                 response_text
             }
-            "deepseek" => {
-                info!("🔑 Using DeepSeek API for continuation plan");
+            "grok" => {
+                info!("🔑 Using Grok API for continuation plan");
                 let (response_text, _input_tokens, _output_tokens) =
-                    crate::engine::llm_providers::deepseek::call_llm_api(
+                    crate::engine::llm_providers::grok::call_llm_api(
                         &self.api_key, user_prompt.clone(), system_prompt, 1500
                     ).await?;
                 response_text

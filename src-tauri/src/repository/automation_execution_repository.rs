@@ -238,29 +238,33 @@ pub fn get_recent_execution_runs_with_steps(
          LIMIT ?1"
     )?;
 
-    let runs = stmt.query_map(params![limit], |row| {
-        Ok(AutomationExecutionRun {
-            id: row.get(0)?,
-            automation_id: row.get(1)?,
-            started_at: row.get(2)?,
-            completed_at: row.get(3)?,
-            status: row.get(4)?,
-            additional_instructions: row.get(5)?,
-            error_message: row.get(6)?,
-            clipboard: row.get(7)?,
-            completion_message: row.get(8)?,
-            created_at: row.get(9)?,
-        })
-    })?
-    .collect::<Result<Vec<_>>>()?;
+    let runs_with_names = stmt
+        .query_map(params![limit], |row| {
+            let run = AutomationExecutionRun {
+                id: row.get(0)?,
+                automation_id: row.get(1)?,
+                started_at: row.get(2)?,
+                completed_at: row.get(3)?,
+                status: row.get(4)?,
+                additional_instructions: row.get(5)?,
+                error_message: row.get(6)?,
+                clipboard: row.get(7)?,
+                completion_message: row.get(8)?,
+                created_at: row.get(9)?,
+            };
+            let automation_name: Option<String> = row.get(10)?;
+            Ok((run, automation_name))
+        })?
+        .collect::<Result<Vec<_>>>()?;
 
     // Get steps for each run
     let mut result = Vec::new();
-    for run in runs {
+    for (run, automation_name) in runs_with_names {
         let steps = get_execution_steps_by_run(db, run.id)?;
         result.push(ExecutionRunWithSteps {
-            run: run.clone(),
+            run,
             steps,
+            automation_name,
         });
     }
 

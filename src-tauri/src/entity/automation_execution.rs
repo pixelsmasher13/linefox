@@ -32,4 +32,8 @@ pub struct AutomationExecutionStep {
 pub struct ExecutionRunWithSteps {
     pub run: AutomationExecutionRun,
     pub steps: Vec<AutomationExecutionStep>,
+    /// Joined-in automation name so the UI can label a run without an extra
+    /// `get_automation_by_id` round-trip per row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation_name: Option<String>,
 }

@@ -42,7 +42,7 @@ lazy_static::lazy_static! {
     // ELEMENT_CACHE defined separately for platform-specific compilation
     static ref LAST_EMITTED_PROGRESS: Arc<Mutex<Option<f32>>> = Arc::new(Mutex::new(None));
     static ref LAST_EMITTED_STATUS: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    static ref LLM_SESSION: Arc<Mutex<Option<LLMSession>>> = Arc::new(Mutex::new(None));
+    pub static ref LLM_SESSION: Arc<Mutex<Option<LLMSession>>> = Arc::new(Mutex::new(None));
     // AUTOMATION_LOG_FILE removed - file logging disabled to prevent reverse engineering
     static ref TAKEOVER_COMPLETE: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
     static ref CLARIFICATION_RESPONSE: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -70,6 +70,13 @@ lazy_static::lazy_static! {
 
     // Accumulated user messages sent during execution (survives sliding window)
     static ref USER_MESSAGES: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Per-run dedupe ledger for FETCH_PAGES.
+    // (run_id, attempted_urls, succeeded_urls) — reset at run start. Prevents
+    // the agent from re-fetching the same URL repeatedly, which is the primary
+    // failure mode of FETCH_PAGES loops.
+    static ref FETCHED_URLS: Arc<Mutex<Option<(i64, std::collections::HashSet<String>, std::collections::HashSet<String>)>>> =
+        Arc::new(Mutex::new(None));
 }
 
 // Platform-specific element cache
@@ -249,6 +256,7 @@ pub fn finalize_execution_run(app_handle: &AppHandle, status: &str, error_messag
     // Clear the execution run ID
     *CURRENT_EXECUTION_RUN_ID.lock().unwrap() = None;
     *CURRENT_STEP_ID.lock().unwrap() = None;
+    *FETCHED_URLS.lock().unwrap() = None;
 }
 
 /// Extract structured data from task memory and store for future reference
@@ -288,6 +296,14 @@ async fn extract_and_store_task_data(
                 2000,
             ).await
         },
+        "openai-codex" => {
+            crate::engine::llm_providers::openai_codex::call_llm_api(
+                api_key,
+                extraction_prompt.clone(),
+                "",
+                2000,
+            ).await
+        },
         "grok" => {
             crate::engine::llm_providers::grok::call_llm_api(
                 api_key,
@@ -320,7 +336,7 @@ async fn extract_and_store_task_data(
                 2000,
             ).await
         },
-        "claude" | _ => {
+        "claude" | "claude-subscription" | _ => {
             crate::engine::llm_providers::claude::call_llm_api(
                 api_key,
                 extraction_prompt.clone(),
@@ -720,6 +736,7 @@ pub async fn execute_automation(
         text_content: None,
         full_text_content: None,
         word_document_info: None,
+        excel_sheet_info: None,
         recent_actions: Vec::new(),
         element_tree: None,
         content_map: Vec::new(),
@@ -1075,6 +1092,7 @@ pub async fn execute_automation_continuation(
         text_content: None,
         full_text_content: None,
         word_document_info: None,
+        excel_sheet_info: None,
         recent_actions: Vec::new(),
         element_tree: None,
         content_map: Vec::new(),
@@ -1538,6 +1556,11 @@ async fn execute_reactive_loop(
                         
                         jwt_token
                     },
+                    "claude-subscription" => app_handle
+                        .db(|db| get_setting(db, "api_key_claude_oauth").map(|s| s.setting_value).unwrap_or_default()),
+                    "openai-codex" => crate::auth::openai_codex_oauth::load(&app_handle)
+                        .map(|c| c.access)
+                        .unwrap_or_default(),
                     "claude" | _ => app_handle
                         .db(|db| get_setting(db, "api_key_claude").expect("Failed to get Claude API key"))
                         .setting_value,
@@ -1697,7 +1720,31 @@ async fn execute_reactive_loop(
 
                         response_text
                     },
-                    "claude" | _ => {
+                    "openai-codex" => {
+                        let (session_data, session_exists) = {
+                            let mut session_guard = LLM_SESSION.lock().unwrap();
+                            if let Some(session) = session_guard.as_mut() {
+                                (Some(session.clone()), true)
+                            } else {
+                                (None, false)
+                            }
+                        };
+                        if !session_exists {
+                            return Err("No LLM session available".to_string());
+                        }
+                        let mut session = session_data.unwrap();
+                        let (response_text, input_tokens, output_tokens) =
+                            crate::engine::llm_providers::openai_codex::call_llm_api_with_session(
+                                &api_key, &mut session, all_elements_prompt, 1000
+                            ).await?;
+                        log_token_usage(input_tokens, output_tokens, "ALL_ELEMENTS");
+                        {
+                            let mut session_guard = LLM_SESSION.lock().unwrap();
+                            *session_guard = Some(session);
+                        }
+                        response_text
+                    },
+                    "claude" | "claude-subscription" | _ => {
                         let (session_data, session_exists) = {
                             let mut session_guard = LLM_SESSION.lock().unwrap();
                             if let Some(session) = session_guard.as_mut() {
@@ -1707,25 +1754,25 @@ async fn execute_reactive_loop(
                                 (None, false)
                             }
                         };
-                        
+
                         if !session_exists {
                             return Err("No LLM session available".to_string());
                         }
-                        
+
                         let mut session = session_data.unwrap();
                         let (response_text, input_tokens, output_tokens) =
                             crate::engine::llm_providers::claude::call_llm_api_with_session(
                                 &api_key, &mut session, all_elements_prompt, 1000
                             ).await?;
-                        
+
                         // Log token usage for ALL_ELEMENTS request
                         log_token_usage(input_tokens, output_tokens, "ALL_ELEMENTS");
-                        
+
                         {
                             let mut session_guard = LLM_SESSION.lock().unwrap();
                             *session_guard = Some(session);
                         }
-                        
+
                         response_text
                     }
                 };
@@ -1922,6 +1969,21 @@ async fn execute_reactive_loop(
                                         let truncated = if query.len() > 60 { truncate_str(query, 60) } else { query };
                                         format!("GOOGLE_SEARCH:{}", truncated)
                                     },
+                                    ActionType::FetchPages => {
+                                        let urls = new_action.parameters.as_ref()
+                                            .and_then(|p| p.get("urls"))
+                                            .map(|u| u.as_str())
+                                            .unwrap_or("");
+                                        format!("FETCH_PAGES:{}", urls)
+                                    },
+                                    ActionType::WriteFile => {
+                                        let path = new_action.parameters.as_ref()
+                                            .and_then(|p| p.get("path"))
+                                            .map(|p| p.as_str())
+                                            .unwrap_or("");
+                                        format!("WRITE_FILE:{}", path)
+                                    },
+                                    ActionType::BrowserConsole => "BROWSER_CONSOLE".to_string(),
                                     ActionType::NavigateURL => {
                                         let url = new_action.parameters.as_ref()
                                             .and_then(|p| p.get("url"))
@@ -2145,6 +2207,11 @@ async fn execute_reactive_loop(
                         
                         jwt_token
                     },
+                    "claude-subscription" => app_handle
+                        .db(|db| get_setting(db, "api_key_claude_oauth").map(|s| s.setting_value).unwrap_or_default()),
+                    "openai-codex" => crate::auth::openai_codex_oauth::load(&app_handle)
+                        .map(|c| c.access)
+                        .unwrap_or_default(),
                     "claude" | _ => app_handle
                         .db(|db| get_setting(db, "api_key_claude").expect("Failed to get Claude API key"))
                         .setting_value,
@@ -2301,7 +2368,31 @@ async fn execute_reactive_loop(
 
                         response_text
                     },
-                    "claude" | _ => {
+                    "openai-codex" => {
+                        let (session_data, session_exists) = {
+                            let mut session_guard = LLM_SESSION.lock().unwrap();
+                            if let Some(session) = session_guard.as_mut() {
+                                (Some(session.clone()), true)
+                            } else {
+                                (None, false)
+                            }
+                        };
+                        if !session_exists {
+                            return Err("No LLM session available".to_string());
+                        }
+                        let mut session = session_data.unwrap();
+                        let (response_text, input_tokens, output_tokens) =
+                            crate::engine::llm_providers::openai_codex::call_llm_api_with_session(
+                                &api_key, &mut session, full_text_prompt, 1000
+                            ).await?;
+                        log_token_usage(input_tokens, output_tokens, "FULL_TEXT");
+                        {
+                            let mut session_guard = LLM_SESSION.lock().unwrap();
+                            *session_guard = Some(session);
+                        }
+                        response_text
+                    },
+                    "claude" | "claude-subscription" | _ => {
                         let (session_data, session_exists) = {
                             let mut session_guard = LLM_SESSION.lock().unwrap();
                             if let Some(session) = session_guard.as_mut() {
@@ -2314,21 +2405,21 @@ async fn execute_reactive_loop(
                         if !session_exists {
                             return Err("No LLM session available".to_string());
                         }
-                        
+
                         let mut session = session_data.unwrap();
                         let (response_text, input_tokens, output_tokens) =
                             crate::engine::llm_providers::claude::call_llm_api_with_session(
                                 &api_key, &mut session, full_text_prompt, 1000
                             ).await?;
-                        
+
                         // Log token usage for FULL_TEXT request
                         log_token_usage(input_tokens, output_tokens, "FULL_TEXT");
-                        
+
                         {
                             let mut session_guard = LLM_SESSION.lock().unwrap();
                             *session_guard = Some(session);
                         }
-                        
+
                         response_text
                     }
                 };
@@ -2851,6 +2942,21 @@ async fn execute_reactive_loop(
                                 let truncated = if query.len() > 60 { truncate_str(query, 60) } else { query };
                                 format!("GOOGLE_SEARCH:{}", truncated)
                             },
+                            ActionType::FetchPages => {
+                                let urls = action.parameters.as_ref()
+                                    .and_then(|p| p.get("urls"))
+                                    .map(|u| u.as_str())
+                                    .unwrap_or("");
+                                format!("FETCH_PAGES:{}", urls)
+                            },
+                            ActionType::WriteFile => {
+                                let path = action.parameters.as_ref()
+                                    .and_then(|p| p.get("path"))
+                                    .map(|p| p.as_str())
+                                    .unwrap_or("");
+                                format!("WRITE_FILE:{}", path)
+                            },
+                            ActionType::BrowserConsole => "BROWSER_CONSOLE".to_string(),
                             ActionType::NavigateURL => {
                                 let url = action.parameters.as_ref()
                                     .and_then(|p| p.get("url"))
@@ -3056,6 +3162,7 @@ async fn update_app_state() -> Result<AppState, String> {
         text_content: None,
         full_text_content: None,
         word_document_info: None,
+        excel_sheet_info: None,
         recent_actions: Vec::new(),
         element_tree: None,
         content_map: Vec::new(),
@@ -3946,6 +4053,23 @@ async fn decide_next_action(
             }
             (key, "Gemini")
         },
+        "claude-subscription" => {
+            let key = app_handle
+                .db(|db| get_setting(db, "api_key_claude_oauth").map(|s| s.setting_value).unwrap_or_default());
+            if key.is_empty() {
+                return Err("Claude OAuth token is not configured — sign in via Settings.".to_string());
+            }
+            (key, "Claude (subscription)")
+        },
+        "openai-codex" => {
+            let key = crate::auth::openai_codex_oauth::load(&app_handle)
+                .map(|c| c.access)
+                .unwrap_or_default();
+            if key.is_empty() {
+                return Err("ChatGPT (subscription) not signed in — sign in via Settings.".to_string());
+            }
+            (key, "ChatGPT (subscription)")
+        },
         "claude" | _ => {
             let key = app_handle
                 .db(|db| get_setting(db, "api_key_claude").expect("Failed to get Claude API key"))
@@ -3956,7 +4080,7 @@ async fn decide_next_action(
             (key, "Claude")
         }
     };
-    
+
     info!("Using {} provider for LLM interaction", provider_name);
     
     // Check if we have an active session
@@ -4151,7 +4275,31 @@ async fn decide_next_action(
                 
                 response_text
             },
-            "claude" | _ => {
+            "openai-codex" => {
+                let (session_data, session_exists) = {
+                    let mut session_guard = LLM_SESSION.lock().unwrap();
+                    if let Some(session) = session_guard.as_mut() {
+                        (Some(session.clone()), true)
+                    } else {
+                        (None, false)
+                    }
+                };
+                if !session_exists {
+                    return Err("No LLM session available".to_string());
+                }
+                let mut session = session_data.unwrap();
+                let (response_text, input_tokens, output_tokens) =
+                    crate::engine::llm_providers::openai_codex::call_llm_api_with_session(
+                        &api_key, &mut session, incremental_prompt, 2000
+                    ).await?;
+                log_token_usage(input_tokens, output_tokens, "DECISION_STEP");
+                {
+                    let mut session_guard = LLM_SESSION.lock().unwrap();
+                    *session_guard = Some(session);
+                }
+                response_text
+            },
+            "claude" | "claude-subscription" | _ => {
                 // Clone the session data to avoid holding the lock across await
                 let (session_data, session_exists) = {
                     let mut session_guard = LLM_SESSION.lock().unwrap();
@@ -4162,26 +4310,26 @@ async fn decide_next_action(
                         (None, false)
                     }
                 };
-                
+
                 if !session_exists {
                     return Err("No LLM session available".to_string());
                 }
-                
+
                 let mut session = session_data.unwrap();
                 let (response_text, input_tokens, output_tokens) =
                     crate::engine::llm_providers::claude::call_llm_api_with_session(
                         &api_key, &mut session, incremental_prompt, 2000
                     ).await?;
-                
+
                 // Log token usage for this step
                 log_token_usage(input_tokens, output_tokens, "DECISION_STEP");
-                
+
                 // Update the global session with the modified data
                 {
                     let mut session_guard = LLM_SESSION.lock().unwrap();
                     *session_guard = Some(session);
                 }
-                
+
                 response_text
             }
         };
@@ -4435,12 +4583,20 @@ async fn decide_next_action(
             log_token_usage(input_tokens, output_tokens, "STATELESS_DECISION");
             response_text
         },
-        "claude" | _ => {
-            let (response_text, input_tokens, output_tokens) = 
+        "openai-codex" => {
+            let (response_text, input_tokens, output_tokens) =
+                crate::engine::llm_providers::openai_codex::call_llm_api(
+                    &api_key, prompt, &system_prompt, 2000
+                ).await?;
+            log_token_usage(input_tokens, output_tokens, "STATELESS_DECISION");
+            response_text
+        },
+        "claude" | "claude-subscription" | _ => {
+            let (response_text, input_tokens, output_tokens) =
                 crate::engine::llm_providers::claude::call_llm_api(
                     &api_key, prompt, &system_prompt, 2000
                 ).await?;
-            
+
             // Log token usage for stateless decision
             log_token_usage(input_tokens, output_tokens, "STATELESS_DECISION");
             response_text
@@ -4913,6 +5069,15 @@ async fn execute_action(
                             .db(|db| get_setting(db, "api_key_gemini").expect("Failed to get Gemini API key"))
                             .setting_value
                     },
+                    "claude-subscription" => {
+                        app_handle
+                            .db(|db| get_setting(db, "api_key_claude_oauth").map(|s| s.setting_value).unwrap_or_default())
+                    },
+                    "openai-codex" => {
+                        crate::auth::openai_codex_oauth::load(&app_handle)
+                            .map(|c| c.access)
+                            .unwrap_or_default()
+                    },
                     "claude" | _ => {
                         app_handle
                             .db(|db| get_setting(db, "api_key_claude").expect("Failed to get Claude API key"))
@@ -4962,7 +5127,15 @@ async fn execute_action(
                             1000,
                         ).await
                     },
-                    "claude" | _ => {
+                    "openai-codex" => {
+                        crate::engine::llm_providers::openai_codex::call_llm_api(
+                            &api_key,
+                            completion_prompt.clone(),
+                            "",
+                            1000,
+                        ).await
+                    },
+                    "claude" | "claude-subscription" | _ => {
                         crate::engine::llm_providers::claude::call_llm_api(
                             &api_key,
                             completion_prompt.clone(),
@@ -6000,6 +6173,155 @@ async fn execute_action(
                 Err("Parameters required for TerminalRead action".to_string())
             }
         },
+        // Browser console: fetch Chrome JS errors via CDP (--remote-debugging-port=9222)
+        ActionType::BrowserConsole => {
+            info!("Fetching browser console errors via CDP");
+            match crate::engine::browser_console::get_console_errors().await {
+                Some(errors) => {
+                    let _ = crate::engine::browser_console::clear_console_errors().await;
+                    Ok(errors)
+                },
+                None => {
+                    Ok("No browser console errors found (Chrome DevTools may not be available — launch Chrome with --remote-debugging-port=9222 to enable).".to_string())
+                }
+            }
+        },
+        // Direct file write — bypasses shell escaping
+        ActionType::WriteFile => {
+            if let Some(params) = &action.parameters {
+                let path = params.get("path").map(|s| s.as_str()).unwrap_or("");
+                let content = params.get("content").map(|s| s.as_str()).unwrap_or("");
+
+                if path.is_empty() {
+                    return Err("File path is required for WriteFile action".to_string());
+                }
+
+                info!("Writing file: {} ({} bytes)", path, content.len());
+                log_and_file("INFO", &format!("WriteFile: {} ({} bytes)", path, content.len()));
+
+                let file_path = std::path::Path::new(path);
+
+                if let Some(parent) = file_path.parent() {
+                    if !parent.exists() {
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            return Err(format!("Failed to create directories for {}: {}", path, e));
+                        }
+                    }
+                }
+
+                match std::fs::write(file_path, content) {
+                    Ok(_) => {
+                        let msg = format!("File written successfully: {} ({} bytes)", path, content.len());
+                        info!("{}", msg);
+                        Ok(msg)
+                    },
+                    Err(e) => {
+                        let msg = format!("Failed to write file {}: {}", path, e);
+                        warn!("{}", msg);
+                        Err(msg)
+                    }
+                }
+            } else {
+                Err("Parameters required for WriteFile action".to_string())
+            }
+        },
+        // Parallel HTTP fetch: grab page content from URLs without using the browser
+        ActionType::FetchPages => {
+            if let Some(params) = &action.parameters {
+                let urls_str = params.get("urls").map(|s| s.as_str()).unwrap_or("");
+
+                if urls_str.is_empty() {
+                    return Err("FETCH_PAGES requires at least one URL".to_string());
+                }
+
+                let urls: Vec<String> = urls_str
+                    .split(',')
+                    .map(|u| u.trim().to_string())
+                    .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+                    .take(8)
+                    .collect();
+
+                if urls.is_empty() {
+                    return Err("FETCH_PAGES: no valid HTTP URLs provided".to_string());
+                }
+
+                // Reject URLs already attempted in this run. Re-fetching is the
+                // primary failure mode behind FETCH_PAGES loops, so we enforce
+                // "one fetch per URL per run" server-side rather than relying on
+                // the prompt.
+                let run_id = *CURRENT_EXECUTION_RUN_ID.lock().unwrap();
+                let (fresh_urls, duplicate_urls): (Vec<String>, Vec<(String, bool)>) = {
+                    let mut ledger = FETCHED_URLS.lock().unwrap();
+                    let entry = match (run_id, ledger.as_mut()) {
+                        (Some(rid), Some(e)) if e.0 == rid => Some(e),
+                        (Some(rid), _) => {
+                            *ledger = Some((rid, std::collections::HashSet::new(), std::collections::HashSet::new()));
+                            ledger.as_mut()
+                        }
+                        _ => None,
+                    };
+                    match entry {
+                        Some(e) => {
+                            let mut fresh = Vec::new();
+                            let mut dup = Vec::new();
+                            for u in urls.into_iter() {
+                                if e.1.contains(&u) {
+                                    let succeeded = e.2.contains(&u);
+                                    dup.push((u, succeeded));
+                                } else {
+                                    fresh.push(u);
+                                }
+                            }
+                            (fresh, dup)
+                        }
+                        None => (urls, Vec::new()),
+                    }
+                };
+
+                if fresh_urls.is_empty() {
+                    let mut msg = String::from("FETCH_PAGES rejected: every URL was already fetched this run.\n");
+                    for (u, ok) in &duplicate_urls {
+                        msg.push_str(&format!("  - {} ({})\n", u, if *ok { "succeeded earlier" } else { "failed earlier" }));
+                    }
+                    msg.push_str("\nDo NOT re-fetch. If a URL succeeded earlier, the content is in your RECENT ACTIONS / MEMORY — re-read it. If it failed, the URL is bad — try GOOGLE_SEARCH for a different source.");
+                    return Err(msg);
+                }
+
+                let mut prefix = String::new();
+                if !duplicate_urls.is_empty() {
+                    prefix.push_str(&format!(
+                        "Skipped {} duplicate URL(s) (already fetched this run — do NOT retry):\n",
+                        duplicate_urls.len()
+                    ));
+                    for (u, ok) in &duplicate_urls {
+                        prefix.push_str(&format!("  - {} ({})\n", u, if *ok { "succeeded earlier" } else { "failed earlier" }));
+                    }
+                    prefix.push('\n');
+                }
+
+                info!("FETCH_PAGES: fetching {} new URL(s) in parallel ({} skipped as duplicates)", fresh_urls.len(), duplicate_urls.len());
+                log_and_file("INFO", &format!("FETCH_PAGES: {} URL(s): {}", fresh_urls.len(), fresh_urls.join(", ")));
+
+                let (result, succeeded_urls) = crate::engine::web_fetcher::fetch_and_extract_pages(fresh_urls.clone()).await;
+
+                // Mark every attempted URL as fetched (failures count too — a 404
+                // doesn't become a 200 on retry).
+                if let Some(rid) = run_id {
+                    let mut ledger = FETCHED_URLS.lock().unwrap();
+                    let entry = ledger.get_or_insert_with(|| (rid, std::collections::HashSet::new(), std::collections::HashSet::new()));
+                    for u in &fresh_urls {
+                        entry.1.insert(u.clone());
+                    }
+                    for u in &succeeded_urls {
+                        entry.2.insert(u.clone());
+                    }
+                }
+
+                Ok(format!("{}{}", prefix, result))
+            } else {
+                Err("Parameters required for FetchPages action".to_string())
+            }
+        },
         // Google Search acceleration: launch Chrome, navigate to search URL, wait for results
         ActionType::GoogleSearch => {
             if let Some(params) = &action.parameters {
@@ -6884,6 +7206,7 @@ pub async fn execute_automation_agent_mode(
         text_content: None,
         full_text_content: None,
         word_document_info: None,
+        excel_sheet_info: None,
         recent_actions: Vec::new(),
         element_tree: None,
         content_map: Vec::new(),
@@ -6985,6 +7308,8 @@ pub async fn execute_automation_agent_mode(
                     app_handle.db(|db| crate::repository::user_auth_repository::get_valid_auth_token(db, &user_id))
                         .ok().flatten().unwrap_or_default()
                 },
+                "claude-subscription" => app_handle.db(|db| get_setting(db, "api_key_claude_oauth").map(|s| s.setting_value).unwrap_or_default()),
+                "openai-codex" => crate::auth::openai_codex_oauth::load(&app_handle).map(|c| c.access).unwrap_or_default(),
                 "claude" | _ => app_handle.db(|db| get_setting(db, "api_key_claude").expect("Failed to get Claude API key")).setting_value,
             };
 
@@ -7237,18 +7562,6 @@ async fn execute_agent_mode_loop(
 
                                 agent_mode_engine::clear_plan_history();
                             },
-                            crate::engine::orchestrator_prompt::OrchestratorDecision::RetryCurrentPhase {
-                                phase_name, reason, ..
-                            } => {
-                                log_and_file("INFO", &format!("Orchestrator: Retry phase {}: {}", phase_name, reason));
-
-                                let new_system_prompt = agent_mode_engine::get_executor_system_prompt(objective);
-                                if let Some(session) = LLM_SESSION.lock().unwrap().as_mut() {
-                                    session.messages[0].content = new_system_prompt;
-                                }
-
-                                agent_mode_engine::clear_plan_history();
-                            },
                             crate::engine::orchestrator_prompt::OrchestratorDecision::Complete { summary } => {
                                 log_and_file("INFO", &format!("Orchestrator: Task complete - {}", summary));
 
@@ -7260,22 +7573,15 @@ async fn execute_agent_mode_loop(
                                 finalize_execution_run(app_handle, "completed", None);
                                 return Ok(());
                             },
-                            crate::engine::orchestrator_prompt::OrchestratorDecision::RequestUserInput { question } => {
-                                log_and_file("INFO", &format!("Orchestrator needs user input: {}", question));
+                            crate::engine::orchestrator_prompt::OrchestratorDecision::DirectResponse { response, .. } => {
+                                log_and_file("INFO", &format!("Orchestrator emitted DirectResponse: {}", &response[..std::cmp::min(100, response.len())]));
 
-                                let _ = app_handle.emit("ask_clarification", serde_json::json!({
-                                    "question": question,
-                                    "fromOrchestrator": true,
+                                let _ = app_handle.emit("automation_completion_message", serde_json::json!({
+                                    "message": response,
                                 }));
 
-                                // Wait for clarification
-                                *CLARIFICATION_RESPONSE.lock().unwrap() = None;
-                                while CLARIFICATION_RESPONSE.lock().unwrap().is_none() {
-                                    if *SHOULD_STOP_EXECUTION.lock().unwrap() {
-                                        return Ok(());
-                                    }
-                                    tokio::time::sleep(Duration::from_millis(500)).await;
-                                }
+                                finalize_execution_run(app_handle, "completed", None);
+                                return Ok(());
                             },
                             crate::engine::orchestrator_prompt::OrchestratorDecision::ParseError { raw_response } => {
                                 warn!("Failed to parse orchestrator response, continuing: {}",
@@ -7426,17 +7732,6 @@ async fn execute_agent_mode_loop(
                                 "steps": steps,
                                 "periodicReview": true,
                             }));
-                            let new_system_prompt = agent_mode_engine::get_executor_system_prompt(objective);
-                            if let Some(session) = LLM_SESSION.lock().unwrap().as_mut() {
-                                session.messages[0].content = new_system_prompt;
-                            }
-                            agent_mode_engine::clear_plan_history();
-                            continue;
-                        },
-                        crate::engine::orchestrator_prompt::OrchestratorDecision::RetryCurrentPhase {
-                            phase_name: retry_phase, reason, ..
-                        } => {
-                            log_and_file("INFO", &format!("Periodic review: orchestrator retrying phase {}: {}", retry_phase, reason));
                             let new_system_prompt = agent_mode_engine::get_executor_system_prompt(objective);
                             if let Some(session) = LLM_SESSION.lock().unwrap().as_mut() {
                                 session.messages[0].content = new_system_prompt;
@@ -7700,9 +7995,10 @@ async fn execute_action_with_verification(
     // Generate verification message
     let mut verification_msg = generate_verification_message(action, pre_state, &post_state, &pre_app, pre_elements_count);
 
-    // For TerminalRun actions, include the command output so the LLM can see what happened.
-    // Without this, the LLM is blind to terminal results and may re-run commands unnecessarily.
-    if action.action_type == ActionType::TerminalRun || action.action_type == ActionType::TerminalBackground {
+    // For TerminalRun and FetchPages actions, include the result so the LLM can see what happened.
+    // Without this, the LLM is blind to terminal/fetch results and may re-run commands unnecessarily.
+    if action.action_type == ActionType::TerminalRun || action.action_type == ActionType::TerminalBackground
+        || action.action_type == ActionType::FetchPages || action.action_type == ActionType::WriteFile {
         let combined = if let Some(existing) = verification_msg {
             format!("{}\n{}", existing, action_result)
         } else {

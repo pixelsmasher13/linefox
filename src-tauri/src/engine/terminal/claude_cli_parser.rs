@@ -654,6 +654,19 @@ pub fn is_claude_cli_command(command: &str) -> bool {
     cmd.contains("/claude ")
 }
 
+/// Extract the session_id from a raw Claude CLI JSONL line.
+/// Claude CLI includes `"session_id"` on every event; we read it directly from
+/// the wrapper (`ClaudeCliEvent`) before the converter discards it.
+pub fn extract_session_id_from_jsonl(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    serde_json::from_str::<ClaudeCliEvent>(trimmed)
+        .ok()
+        .and_then(|e| e.session_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

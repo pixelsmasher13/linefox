@@ -28,6 +28,7 @@ import { SkillsView, Skill } from "./components/SkillsView";
 import { SkillEditor } from "./components/SkillEditor";
 import { AutomationsList } from "./components/AutomationsList";
 import { ScheduleTaskModal } from "./components/ScheduleTaskModal";
+import { WeeklyCalendarView } from "./components/WeeklyCalendarView";
 import { AccessibilityPermissionPrompt } from "../../components/AccessibilityPermissionPrompt";
 import { UpdateModal } from "../../components/UpdateModal";
 
@@ -445,7 +446,7 @@ export const AutomationScreen: FC = () => {
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [showScheduledOnly, setShowScheduledOnly] = useState(false);
   const [scheduledAutomationIds, setScheduledAutomationIds] = useState<Set<number>>(new Set());
-  const [sidebarView, setSidebarView] = useState<'tasks' | 'history' | 'skills'>('history');
+  const [sidebarView, setSidebarView] = useState<'tasks' | 'history' | 'skills' | 'calendar'>('history');
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [availableRoles, setAvailableRoles] = useState<Skill[]>([]);
@@ -1038,6 +1039,23 @@ export const AutomationScreen: FC = () => {
               >
                 Skills
               </Button>
+              <Button
+                leftIcon={<Calendar size={14} />}
+                variant="ghost"
+                bg={sidebarView === 'calendar' ? 'blue.50' : 'transparent'}
+                color={sidebarView === 'calendar' ? 'blue.600' : 'gray.600'}
+                _hover={{ bg: sidebarView === 'calendar' ? 'blue.100' : 'gray.100' }}
+                size="sm"
+                justifyContent="flex-start"
+                onClick={() => {
+                  setSidebarView('calendar');
+                  setSelectedSkill(null);
+                  setSelectedExecution(null);
+                  selectAutomation(null);
+                }}
+              >
+                Calendar
+              </Button>
               {/* Search - only show when on history view */}
               {sidebarView === 'history' && (
                 isSearchOpen ? (
@@ -1270,7 +1288,18 @@ export const AutomationScreen: FC = () => {
         />
         
         <AutomationContainer>
-          {selectedSkill ? (
+          {sidebarView === 'calendar' ? (
+            <WeeklyCalendarView
+              onEditSchedule={(automationId, automationName) => {
+                setScheduleModal({
+                  isOpen: true,
+                  automationId,
+                  automationName,
+                  executionRunId: null,
+                });
+              }}
+            />
+          ) : selectedSkill ? (
             // Show skill editor when a skill is selected
             <Box width="100%" height="100%" p={8} overflow="auto">
               <Box maxW="800px" mx="auto">

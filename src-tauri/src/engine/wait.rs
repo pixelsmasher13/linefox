@@ -322,7 +322,7 @@ where
             ActionType::NavigateURL | ActionType::GoogleSearch => {
                 info!("Windows/NVDA: Fixed wait after URL navigation (2000ms for page load)");
                 // Wait longer for page navigation to complete
-                tokio::time::sleep(Duration::from_millis(1000)).await;
+                tokio::time::sleep(Duration::from_millis(2000)).await;
                 // Get fresh state after navigation
                 let final_state = update_app_state().await.ok();
                 return Ok(final_state);
@@ -351,7 +351,7 @@ where
             info!("Smart wait after click: waiting for DOM stability or element change");
 
             // Use consistent wait for all apps
-            let min_wait = Duration::from_millis(1400);
+            let min_wait = Duration::from_millis(2000);
             info!("Click wait time: {}ms for app: {:?}", min_wait.as_millis(), app_state.current_app);
 
             tokio::time::sleep(min_wait).await;
@@ -425,6 +425,27 @@ where
                 ], config, update_app_state).await?;
                 return Ok(Some(final_state))
             } else if is_navigation_key {
+                // Enter/Return in a browser triggers a full page navigation (e.g. submitting
+                // a Google search). Wait comparable to NavigateURL so the page has time to load.
+                let is_browser = app_state.current_app.as_deref()
+                    .map(|a| a.contains("Chrome") || a.contains("Safari") || a.contains("Firefox") || a.contains("Edge") || a.contains("Arc"))
+                    .unwrap_or(false);
+
+                if is_browser {
+                    info!("Smart wait after navigation key in browser: waiting for page load (2000ms + stability)");
+                    tokio::time::sleep(Duration::from_millis(2000)).await;
+                    let nav_config = WaitConfig {
+                        max_wait: Duration::from_secs(1),
+                        check_interval: Duration::from_millis(500),
+                    };
+                    let final_state = wait_for_conditions(&[
+                        WaitCondition::ElementCountDelta { from: element_count_before, min_delta: 10 },
+                        WaitCondition::DomStable { threshold_ms: 500 },
+                        WaitCondition::MinimumWait { duration: Duration::from_millis(500) },
+                    ], nav_config, update_app_state).await?;
+                    return Ok(Some(final_state));
+                }
+
                 info!("Smart wait after navigation key: waiting for changes");
                 let final_state = wait_for_conditions(&[
                     WaitCondition::ElementCountChanged { from: element_count_before },
@@ -469,8 +490,8 @@ where
             info!("No additional wait after user clarification");
             return Ok(None);
         },
-        ActionType::MemorySave => {
-            info!("No wait after memory save - UI unchanged");
+        ActionType::MemorySave | ActionType::FetchPages => {
+            info!("No wait after {:?} - UI unchanged", action.action_type);
             return Ok(None);
         },
         ActionType::NavigateURL | ActionType::GoogleSearch => {

@@ -1,5 +1,4 @@
-//! Word-specific AppleScript commands for macOS
-//!
+//! Word-specific AppleScript commands for macOS//!
 //! These commands provide direct Word automation via AppleScript,
 //! which is more reliable than clicking UI elements.
 
@@ -16,12 +15,20 @@ They use native AppleScript automation and are MORE RELIABLE than clicking UI el
 PREFER these commands over CLICK/TYPE when working with Word.
 
 
-## ⚠️ ONE COMMAND PER ACTION (CRITICAL!)
-Word commands must be executed ONE AT A TIME. Do NOT chain commands with ":::".
-Each command requires its own action step.
-❌ WRONG: WORD_INSERT_TEXT:Line 1:::WORD_INSERT_TEXT:Line 2
-✅ CORRECT: WORD_INSERT_TEXT:Line 1 || Inserting first line
-(then next step): WORD_INSERT_TEXT:Line 2 || Inserting second line
+## ::: CHAINING (supported for INSERT commands only)
+You CAN chain insert/text commands with ::: to build documents faster:
+
+
+✅ WORD_INSERT_TEXT:First paragraph:::WORD_INSERT_TEXT:Second paragraph
+✅ WORD_INSERT_PARAGRAPH:Chapter 1:::WORD_INSERT_TEXT:This chapter covers...
+✅ Mixed: WORD_INSERT_TEXT:Title:::WORD_INSERT_PARAGRAPH:Body text here
+
+⚠️ Do NOT chain formatting commands (BOLD, ITALIC, ALIGN, SET_FONT) with :::
+Formatting requires select → format → deselect workflow and cannot be batched.
+
+
+
+
 
 ## ⚠️ FORMATTING WORKFLOW (IMPORTANT!)
 Formatting commands (BOLD, ITALIC, UNDERLINE, ALIGN, SET_FONT, SET_FONT_SIZE) only work on SELECTED text.
@@ -33,91 +40,40 @@ You MUST follow this workflow:
 ⚠️ CRITICAL: After formatting, you MUST call WORD_DESELECT before pressing keys or inserting text!
 If text is still selected, PRESS:enter or WORD_INSERT_TEXT will DELETE the selected text and replace it.
 
-Example workflow to bold a title then continue writing:
+⚠️ FORMATTING CARRY-OVER: After formatting text (bold, large font, etc.), the NEXT text you insert
+will inherit that formatting! Use WORD_INSERT_PARAGRAPH (auto-resets to Calibri 11pt) or call
+WORD_RESET_FORMATTING before WORD_INSERT_TEXT to prevent carry-over.
+
+Example workflow to bold a title then write normal body text:
 ```
 WORD_SELECT_TEXT:MEMO || Selecting title to format
 WORD_BOLD || Applying bold
 WORD_SET_FONT_SIZE:18 || Setting title size
-WORD_DESELECT || MUST deselect before pressing enter or inserting text
-PRESS:enter || Now safe — cursor moves without deleting the title
+WORD_DESELECT || MUST deselect before inserting text
+WORD_INSERT_PARAGRAPH:This is normal body text || New paragraph auto-resets formatting
 ```
+
+
+
+
+
+
+
 
 ────────────────────────────
 ## SELECTION COMMANDS (use these FIRST before formatting)
 ────────────────────────────
-
-**WORD_SELECT_ALL**
-- Selects all text in the document
-- Example: WORD_SELECT_ALL || Selecting all text to change font
-
-**WORD_SELECT_TEXT:<text>** (RECOMMENDED)
-- Finds and selects specific text in the document
-- More reliable than paragraph numbers - use exact text you want to select
-- Example: WORD_SELECT_TEXT:The quick brown fox || Selecting this sentence to bold it
-
-**WORD_SELECT_PARAGRAPH:<n>**
-- Selects the nth paragraph (1-based: 1 = first paragraph)
-- ⚠️ Less reliable - prefer WORD_SELECT_TEXT when you know the exact text
-- Example: WORD_SELECT_PARAGRAPH:1 || Selecting first paragraph to center it
-
-**WORD_SELECT_BETWEEN:<start_text>:<end_text>**
-- Selects everything from start_text through end_text (inclusive)
-- Great for selecting large blocks like sections or chapters
-- Example: WORD_SELECT_BETWEEN:Introduction:Conclusion || Selecting from Introduction through Conclusion
-- Example: WORD_SELECT_BETWEEN:Chapter 1:Chapter 2 || Selecting entire Chapter 1
-
-**WORD_DESELECT**
-- Collapses selection to cursor at end of previously selected text
-- ⚠️ MUST call this after formatting before inserting text or pressing keys
-- Example: WORD_DESELECT || Deselecting after formatting to avoid overwriting
-
-**WORD_GET_SELECTION**
-- Returns the currently selected text (stores in MEMORY)
-- Use this to verify you've selected the right text before formatting
-- Example: WORD_GET_SELECTION || Checking what text is selected
-
-**WORD_GET_FORMATTING**
-- Returns formatting info for selected text (bold, italic, font, size, alignment)
-- Use to check current formatting before making changes
-- Example: WORD_GET_FORMATTING || Checking formatting of selected paragraph
-
-────────────────────────────
-## FORMATTING COMMANDS (requires text to be selected first!)
-────────────────────────────
-
-**WORD_BOLD**
-- Toggles bold for selected text
-- Example: WORD_BOLD || Making selected text bold
-
-**WORD_ITALIC**
-- Toggles italic for selected text
-- Example: WORD_ITALIC || Making selected text italic
-
-**WORD_UNDERLINE**
-- Toggles underline for selected text
-- Example: WORD_UNDERLINE || Underlining selected text
-
-**WORD_ALIGN:<alignment>**
-- Sets paragraph alignment: left, center, right, justify
-- Example: WORD_ALIGN:center || Centering the selected paragraph
-
-**WORD_SET_FONT:<font_name>**
-- Sets the font for selected text
-- Example: WORD_SET_FONT:Arial || Changing font to Arial
-
-**WORD_SET_FONT_SIZE:<size>**
-- Sets the font size for selected text
-- Example: WORD_SET_FONT_SIZE:14 || Setting font size to 14pt
-
-────────────────────────────
-## TEXT MANIPULATION COMMANDS
-────────────────────────────
-
-**WORD_INSERT_TEXT:<text>**
-- Inserts text at end of document
+@@ -130,292 +140,354 @@
 - Insert entire blocks to text without using \n etc
 - Example: WORD_INSERT_TEXT:Hello, World!
 - Example: WORD_INSERT_TEXT:"This is paragraphy 1. Mary had a little lamb." || Inserting full paragraph
+
+
+
+
+
+
+
 **WORD_FIND_REPLACE:<find>:<replace>**
 - Finds and replaces all occurrences
 - Example: WORD_FIND_REPLACE:old text:new text
@@ -221,29 +177,112 @@ end tell
             if params.is_empty() {
                 return Err("WORD_INSERT_TEXT requires text".to_string());
             }
-            // Escape quotes for AppleScript
             let text = params[0].replace("\"", "\\\"");
+            // Always append a paragraph break so each insert starts its own paragraph
             format!(r#"
 tell application "Microsoft Word"
-    insert text "{}" at end of text object of active document
+    insert text "{}" & return at end of text object of active document
     return "Inserted text successfully"
 end tell
 "#, text)
         },
 
         "WORD_INSERT_PARAGRAPH" => {
-            // Allow empty paragraph (just a line break) for spacing
             let text = if params.is_empty() || params[0].trim().is_empty() {
                 "".to_string()
             } else {
                 params[0].replace("\"", "\\\"")
             };
+            // Reset formatting at insertion point before inserting so the new
+            // paragraph doesn't inherit bold/size/etc. from previous text.
             format!(r#"
 tell application "Microsoft Word"
+    -- Move to end and reset formatting so new paragraph is clean
+    set docEnd to end of content of text object of active document
+    set selection start of selection to docEnd
+    set selection end of selection to docEnd
+    set bold of font object of selection to false
+    set italic of font object of selection to false
+    set underline of font object of selection to underline none
+    set name of font object of selection to "Calibri"
+    set font size of font object of selection to 11
+    set alignment of paragraph format of selection to align paragraph left
     insert text "{}" & return at end of text object of active document
     return "Inserted paragraph successfully"
 end tell
 "#, text)
+        },
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        "WORD_RESET_FORMATTING" => {
+            // Reset the font/paragraph at the current insertion point to defaults.
+            // Call this after formatting text and before inserting new text to prevent
+            // carry-over of bold, font size, etc.
+            r#"
+tell application "Microsoft Word"
+    set bold of font object of selection to false
+    set italic of font object of selection to false
+    set underline of font object of selection to underline none
+    set name of font object of selection to "Calibri"
+    set font size of font object of selection to 11
+    set alignment of paragraph format of selection to align paragraph left
+    return "Formatting reset to defaults (Calibri 11pt, normal)"
+end tell
+"#.to_string()
         },
 
         "WORD_FIND_REPLACE" => {
@@ -285,30 +324,58 @@ end tell
         },
 
         "WORD_BOLD" => {
+            // Idempotent: always sets bold to true (never toggles)
             r#"
 tell application "Microsoft Word"
-    set bold of font object of selection to (not bold of font object of selection)
+    set bold of font object of selection to true
+    return "✓ Text is now BOLD"
+end tell
+"#.to_string()
+        },
+
+        "WORD_UNBOLD" => {
+            r#"
+tell application "Microsoft Word"
+    set bold of font object of selection to false
+    return "✓ Bold removed"
 end tell
 "#.to_string()
         },
 
         "WORD_ITALIC" => {
+            // Idempotent: always sets italic to true (never toggles)
             r#"
 tell application "Microsoft Word"
-    set italic of font object of selection to (not italic of font object of selection)
+    set italic of font object of selection to true
+    return "✓ Text is now ITALIC"
+end tell
+"#.to_string()
+        },
+
+        "WORD_UNITALIC" => {
+            r#"
+tell application "Microsoft Word"
+    set italic of font object of selection to false
+    return "✓ Italic removed"
 end tell
 "#.to_string()
         },
 
         "WORD_UNDERLINE" => {
-            // Toggle between no underline and single underline
+            // Idempotent: always sets underline (never toggles)
             r#"
 tell application "Microsoft Word"
-    if underline of font object of selection is underline none then
-        set underline of font object of selection to underline single
-    else
-        set underline of font object of selection to underline none
-    end if
+    set underline of font object of selection to underline single
+    return "✓ Text is now UNDERLINED"
+end tell
+"#.to_string()
+        },
+
+        "WORD_UNUNDERLINE" => {
+            r#"
+tell application "Microsoft Word"
+    set underline of font object of selection to underline none
+    return "✓ Underline removed"
 end tell
 "#.to_string()
         },
@@ -684,13 +751,24 @@ end tell
 /// Execute a Word command from action parameters HashMap
 /// This is the main entry point called from automation_agent_engine
 /// Returns Ok(result_message) on success, Err(error_message) on failure
+///
+/// Supports ::: chaining for insert commands (WORD_INSERT_TEXT, WORD_INSERT_PARAGRAPH).
 pub async fn execute_word_command_from_params(params: &std::collections::HashMap<String, String>) -> Result<String, String> {
     let command = params.get("command").ok_or("Missing command parameter")?;
+
+    // Handle ::: chaining in raw_input
+    if let Some(raw) = params.get("raw_input") {
+        if raw.contains(":::") {
+            return execute_chained_word_commands(command, raw).await;
+        }
+    }
 
     // Build parameters array based on command type
     let param_vec: Vec<&str> = match command.as_str() {
         "WORD_NEW_DOCUMENT" | "WORD_CLOSE" |
-        "WORD_BOLD" | "WORD_ITALIC" | "WORD_UNDERLINE" | "WORD_DELETE" | "WORD_DESELECT" |
+        "WORD_BOLD" | "WORD_UNBOLD" | "WORD_ITALIC" | "WORD_UNITALIC" | 
+        "WORD_UNDERLINE" | "WORD_UNUNDERLINE" | "WORD_DELETE" | "WORD_DESELECT" |
+        "WORD_RESET_FORMATTING" |
         "WORD_GET_TEXT" | "WORD_GET_SELECTION" | "WORD_GET_FORMATTING" | "WORD_GET_WORD_COUNT" | "WORD_GET_DOCUMENT_INFO" | "WORD_SELECT_ALL" => vec![],
 
         "WORD_OPEN" => {
@@ -706,6 +784,7 @@ pub async fn execute_word_command_from_params(params: &std::collections::HashMap
             let text = params.get("text").map(|s| s.as_str()).unwrap_or("");
             vec![text]
         },
+
         "WORD_FIND_REPLACE" => {
             let find = params.get("find").ok_or("Missing find")?;
             let replace = params.get("replace").ok_or("Missing replace")?;
@@ -749,6 +828,56 @@ pub async fn execute_word_command_from_params(params: &std::collections::HashMap
     };
 
     execute_word_command(command, &param_vec).await
+}
+
+/// Handle ::: chained Word commands by splitting and executing each one.
+async fn execute_chained_word_commands(command: &str, raw_input: &str) -> Result<String, String> {
+    let prefix = format!("{}:", command);
+    let params_part = if raw_input.to_uppercase().starts_with(&prefix.to_uppercase()) {
+        &raw_input[prefix.len()..]
+    } else {
+        raw_input
+    };
+
+    let parts: Vec<&str> = params_part.split(":::").collect();
+    let mut results = Vec::new();
+    let mut errors = Vec::new();
+
+    for (i, part) in parts.iter().enumerate() {
+        let part = part.trim();
+        if part.is_empty() { continue; }
+
+        // Detect if this part starts with a different WORD_ command
+        let (effective_cmd, effective_params) = if part.to_uppercase().starts_with("WORD_") {
+            if let Some(colon_pos) = part.find(':') {
+                (&part[..colon_pos], part[colon_pos + 1..].to_string())
+            } else {
+                (part, String::new())
+            }
+        } else {
+            (command, part.to_string())
+        };
+
+        let param_vec = if effective_params.is_empty() {
+            vec![]
+        } else {
+            vec![effective_params.as_str()]
+        };
+
+        match execute_word_command(effective_cmd, &param_vec).await {
+            Ok(result) => results.push(result),
+            Err(e) => errors.push(format!("Part {}: {}", i + 1, e)),
+        }
+    }
+
+    if !errors.is_empty() {
+        if results.is_empty() {
+            return Err(format!("All {} operations failed: {}", errors.len(), errors.join("; ")));
+        }
+        return Ok(format!("{} succeeded, {} failed: {}", results.len(), errors.len(), results.join(" | ")));
+    }
+
+    Ok(results.join(" | "))
 }
 
 /// Check if the command is a GET command that returns data

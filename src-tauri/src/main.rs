@@ -54,6 +54,7 @@ pub mod permissions;
 mod repository;
 pub mod window_details_collector;
 mod chrome_automation;
+mod auth;
 
 #[derive(Clone, Serialize)]
 #[allow(dead_code)]
@@ -374,6 +375,8 @@ async fn main() {
             crate::engine::remote_bridge::execute_remote_task,
             crate::engine::remote_bridge::stop_remote_task,
             crate::engine::remote_bridge::get_execution_details_command,
+            crate::engine::remote_bridge::classify_desktop_prompt,
+            crate::engine::remote_bridge::classify_continuation_prompt,
             // Telegram bot commands
             crate::engine::telegram_bot::set_telegram_bot_token,
             crate::engine::telegram_bot::set_telegram_allowed_users,
@@ -384,6 +387,10 @@ async fn main() {
             crate::engine::discord_bot::set_discord_allowed_users,
             crate::engine::discord_bot::get_discord_config,
             crate::engine::discord_bot::disconnect_discord_bot,
+            // OpenAI Codex (ChatGPT subscription) OAuth commands
+            crate::auth::openai_codex_oauth::openai_codex_login,
+            crate::auth::openai_codex_oauth::openai_codex_logout,
+            crate::auth::openai_codex_oauth::openai_codex_status,
             // CLI probe commands
             get_detected_cli_tools,
             refresh_cli_probe,
@@ -565,12 +572,19 @@ async fn main() {
             // Load model overrides from DB into the in-memory cache so every
             // LLM call uses the user's saved model without touching the call sites.
             {
-                let m_claude   = app_handle.db(|db| get_setting(db, "model_claude").map(|s| s.setting_value).unwrap_or_default());
-                let m_openai   = app_handle.db(|db| get_setting(db, "model_openai").map(|s| s.setting_value).unwrap_or_default());
-                let m_grok     = app_handle.db(|db| get_setting(db, "model_grok").map(|s| s.setting_value).unwrap_or_default());
-                let m_gemini   = app_handle.db(|db| get_setting(db, "model_gemini").map(|s| s.setting_value).unwrap_or_default());
-                let m_deepseek = app_handle.db(|db| get_setting(db, "model_deepseek").map(|s| s.setting_value).unwrap_or_default());
-                crate::engine::provider_config::init_from_settings(&m_claude, &m_openai, &m_grok, &m_gemini, &m_deepseek);
+                let m_claude        = app_handle.db(|db| get_setting(db, "model_claude").map(|s| s.setting_value).unwrap_or_default());
+                let m_openai        = app_handle.db(|db| get_setting(db, "model_openai").map(|s| s.setting_value).unwrap_or_default());
+                let m_openai_codex  = app_handle.db(|db| get_setting(db, "model_openai_codex").map(|s| s.setting_value).unwrap_or_default());
+                let m_grok          = app_handle.db(|db| get_setting(db, "model_grok").map(|s| s.setting_value).unwrap_or_default());
+                let m_gemini        = app_handle.db(|db| get_setting(db, "model_gemini").map(|s| s.setting_value).unwrap_or_default());
+                let m_deepseek      = app_handle.db(|db| get_setting(db, "model_deepseek").map(|s| s.setting_value).unwrap_or_default());
+                let codex_effort    = app_handle.db(|db| get_setting(db, "openai_codex_reasoning_effort").map(|s| s.setting_value).unwrap_or_default());
+                crate::engine::provider_config::init_from_settings_with_codex(
+                    &m_claude, &m_openai, &m_openai_codex, &m_grok, &m_gemini, &m_deepseek,
+                );
+                if !codex_effort.is_empty() {
+                    crate::engine::provider_config::set_openai_codex_reasoning_effort(&codex_effort);
+                }
             }
             
             // Set up event listener for stop_automation_request
@@ -761,6 +775,14 @@ async fn update_settings(app_handle: AppHandle, settings: Settings) {
         insert_or_update_setting(
             db,
             Setting {
+                setting_key: String::from("api_key_claude_oauth"),
+                setting_value: settings.api_key_claude_oauth.clone(),
+            },
+        )
+        .unwrap();
+        insert_or_update_setting(
+            db,
+            Setting {
                 setting_key: String::from("api_key_open_ai"),
                 setting_value: format!("{}", settings.api_key_open_ai),
             },
@@ -817,6 +839,22 @@ async fn update_settings(app_handle: AppHandle, settings: Settings) {
         insert_or_update_setting(
             db,
             Setting {
+                setting_key: String::from("model_openai_codex"),
+                setting_value: settings.model_openai_codex.clone(),
+            },
+        )
+        .unwrap();
+        insert_or_update_setting(
+            db,
+            Setting {
+                setting_key: String::from("openai_codex_reasoning_effort"),
+                setting_value: settings.openai_codex_reasoning_effort.clone(),
+            },
+        )
+        .unwrap();
+        insert_or_update_setting(
+            db,
+            Setting {
                 setting_key: String::from("model_grok"),
                 setting_value: settings.model_grok.clone(),
             },
@@ -848,13 +886,19 @@ async fn update_settings(app_handle: AppHandle, settings: Settings) {
         .unwrap();
     });
 
-    crate::engine::provider_config::init_from_settings(
+    crate::engine::provider_config::init_from_settings_with_codex(
         &settings.model_claude,
         &settings.model_openai,
+        &settings.model_openai_codex,
         &settings.model_grok,
         &settings.model_gemini,
         &settings.model_deepseek,
     );
+    if !settings.openai_codex_reasoning_effort.is_empty() {
+        crate::engine::provider_config::set_openai_codex_reasoning_effort(
+            &settings.openai_codex_reasoning_effort,
+        );
+    }
 }
 
 #[tauri::command]

@@ -41,12 +41,23 @@ struct Usage {
     completion_tokens: u32,
     #[serde(default)]
     completion_tokens_details: Option<CompletionTokensDetails>,
+    /// OpenAI auto-caches prompt prefixes >=1024 tokens since Oct 2024.
+    /// `cached_tokens` reports how many of `prompt_tokens` were served from cache,
+    /// which is how we verify the prefix (system prompt) is actually stable turn-to-turn.
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
 }
 
 #[derive(Deserialize)]
 struct CompletionTokensDetails {
     #[serde(default)]
     reasoning_tokens: u32,
+}
+
+#[derive(Deserialize)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: u32,
 }
 
 /// Call OpenAI API with session context
@@ -112,6 +123,7 @@ pub async fn call_llm_api_with_session(
         // Update session token counts
         session.total_input_tokens += response_body.usage.prompt_tokens;
         session.total_output_tokens += response_body.usage.completion_tokens;
+        session.api_calls += 1;
 
         // Add assistant response to session history
         session.add_assistant_response(assistant_response.clone());
@@ -121,6 +133,13 @@ pub async fn call_llm_api_with_session(
             .as_ref()
             .map(|d| d.reasoning_tokens)
             .unwrap_or(0);
+
+        let cached_tokens = response_body.usage.prompt_tokens_details
+            .as_ref()
+            .map(|d| d.cached_tokens)
+            .unwrap_or(0);
+
+        session.cache_read_tokens += cached_tokens;
 
         if reasoning_tokens > 0 {
             info!(
@@ -140,7 +159,18 @@ pub async fn call_llm_api_with_session(
                 session.total_output_tokens
             );
         }
-        
+
+        if cached_tokens > 0 {
+            let total_input = response_body.usage.prompt_tokens;
+            let hit_rate = if total_input > 0 {
+                (cached_tokens as f32 / total_input as f32) * 100.0
+            } else { 0.0 };
+            info!(
+                "OpenAI cache: {} cached of {} input tokens ({:.1}% hit rate)",
+                cached_tokens, total_input, hit_rate
+            );
+        }
+
         Ok((assistant_response, response_body.usage.prompt_tokens, response_body.usage.completion_tokens))
     } else {
         let error_message = response
@@ -205,6 +235,11 @@ pub async fn call_llm_api(
             .map(|d| d.reasoning_tokens)
             .unwrap_or(0);
 
+        let cached_tokens = response_body.usage.prompt_tokens_details
+            .as_ref()
+            .map(|d| d.cached_tokens)
+            .unwrap_or(0);
+
         if reasoning_tokens > 0 {
             info!(
                 "OpenAI API token usage - Input: {}, Output: {}, Reasoning: {}",
@@ -216,12 +251,32 @@ pub async fn call_llm_api(
                 response_body.usage.prompt_tokens, response_body.usage.completion_tokens
             );
         }
-        
+
+        if cached_tokens > 0 {
+            let total_input = response_body.usage.prompt_tokens;
+            let hit_rate = if total_input > 0 {
+                (cached_tokens as f32 / total_input as f32) * 100.0
+            } else { 0.0 };
+            info!(
+                "OpenAI cache: {} cached of {} input tokens ({:.1}% hit rate)",
+                cached_tokens, total_input, hit_rate
+            );
+        }
+
+        // Fold into active LLM_SESSION (or standalone tally if none).
+        crate::engine::usage_tracker::record_stateless_call(
+            "openai",
+            response_body.usage.prompt_tokens,
+            response_body.usage.completion_tokens,
+            cached_tokens,
+            0,
+        );
+
         // Extract the text
         let response_text = response_body.choices.first()
             .ok_or_else(|| "Empty response from OpenAI API".to_string())
             .map(|choice| choice.message.content.trim().to_string())?;
-        
+
         Ok((response_text, response_body.usage.prompt_tokens, response_body.usage.completion_tokens))
     } else {
         let error_message = response

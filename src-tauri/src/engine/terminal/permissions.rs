@@ -117,7 +117,7 @@ impl AllowlistEntry {
         };
 
         // Check if pattern contains path separators (full path pattern)
-        let is_path_pattern = expanded_pattern.contains('/');
+        let is_path_pattern = expanded_pattern.contains('/') || expanded_pattern.contains('\\');
 
         if is_path_pattern {
             // Match against resolved path or executable
@@ -301,20 +301,31 @@ impl TerminalPermissions {
             AllowlistEntry::with_description("dig", "DNS lookup"),
             AllowlistEntry::with_description("host", "DNS lookup"),
             
-            // Common file/directory operations
-            AllowlistEntry::with_description("cd", "Change directory"),
-            AllowlistEntry::with_description("mkdir", "Create directory"),
-            AllowlistEntry::with_description("touch", "Create empty file"),
-            AllowlistEntry::with_description("cp", "Copy files"),
-            AllowlistEntry::with_description("mv", "Move files"),
-            AllowlistEntry::with_description("rm", "Remove files"),
-
             // Compression (often needed for package operations)
             AllowlistEntry::with_description("tar", "Archive utility"),
             AllowlistEntry::with_description("gzip", "Compression"),
             AllowlistEntry::with_description("gunzip", "Decompression"),
             AllowlistEntry::with_description("zip", "Compression"),
             AllowlistEntry::with_description("unzip", "Decompression"),
+            
+            // Windows built-in commands (these are cmd.exe builtins, not separate executables)
+            AllowlistEntry::with_description("dir", "List directory contents (Windows)"),
+            AllowlistEntry::with_description("cd", "Change directory"),
+            AllowlistEntry::with_description("mkdir", "Create directory"),
+            AllowlistEntry::with_description("rmdir", "Remove directory"),
+            AllowlistEntry::with_description("copy", "Copy files (Windows)"),
+            AllowlistEntry::with_description("move", "Move files (Windows)"),
+            AllowlistEntry::with_description("del", "Delete files (Windows)"),
+            AllowlistEntry::with_description("ren", "Rename files (Windows)"),
+            AllowlistEntry::with_description("where", "Locate a command (Windows)"),
+            AllowlistEntry::with_description("set", "Show/set environment variables"),
+            AllowlistEntry::with_description("cls", "Clear screen (Windows)"),
+            AllowlistEntry::with_description("tree", "Display directory tree"),
+            AllowlistEntry::with_description("cp", "Copy files"),
+            AllowlistEntry::with_description("mv", "Move files"),
+            AllowlistEntry::with_description("rm", "Remove files"),
+            AllowlistEntry::with_description("touch", "Create empty file"),
+            AllowlistEntry::with_description("powershell", "PowerShell"),
         ]
     }
 
@@ -378,6 +389,28 @@ impl TerminalPermissions {
                     info!("Loaded terminal permissions from {:?}", path);
                     // Ensure session_allowlist is empty on load
                     perms.session_allowlist = HashSet::new();
+                    
+                    // Merge any missing default allowlist entries (e.g., new commands
+                    // added in app updates like Windows builtins: dir, mkdir, etc.)
+                    let defaults = Self::default_allowlist();
+                    let existing: HashSet<String> = perms.allowlist.iter()
+                        .map(|e| e.pattern.to_lowercase())
+                        .collect();
+                    let mut added = 0;
+                    for entry in defaults {
+                        if !existing.contains(&entry.pattern.to_lowercase()) {
+                            perms.allowlist.push(entry);
+                            added += 1;
+                        }
+                    }
+                    if added > 0 {
+                        info!("Added {} new default commands to allowlist", added);
+                        // Save so we don't re-add them next time
+                        if let Err(e) = perms.save() {
+                            warn!("Failed to save updated permissions: {}", e);
+                        }
+                    }
+                    
                     return perms;
                 }
                 Err(e) => {
@@ -628,7 +661,11 @@ impl ResolvedCommand {
     /// Resolve an executable to its full path
     fn resolve_executable(executable: &str) -> Option<String> {
         // If it's already a path, check if it exists
-        if executable.contains('/') {
+        // Check for both Unix (/) and Windows (\, C:\) path separators
+        let is_path = executable.contains('/')
+            || executable.contains('\\')
+            || (executable.len() >= 3 && executable.as_bytes()[1] == b':');
+        if is_path {
             let path = PathBuf::from(executable);
             if path.exists() && path.is_file() {
                 return Some(path.to_string_lossy().to_string());
@@ -636,12 +673,22 @@ impl ResolvedCommand {
             return None;
         }
 
-        // Search in PATH
+        // Search in PATH using platform-aware splitting (: on Unix, ; on Windows)
         if let Ok(path_var) = std::env::var("PATH") {
-            for dir in path_var.split(':') {
-                let full_path = PathBuf::from(dir).join(executable);
+            for dir in std::env::split_paths(&path_var) {
+                let full_path = dir.join(executable);
                 if full_path.exists() && full_path.is_file() {
                     return Some(full_path.to_string_lossy().to_string());
+                }
+                // On Windows, also check with common extensions if no extension given
+                #[cfg(target_os = "windows")]
+                if !executable.contains('.') {
+                    for ext in &[".exe", ".cmd", ".bat", ".com"] {
+                        let with_ext = dir.join(format!("{}{}", executable, ext));
+                        if with_ext.exists() && with_ext.is_file() {
+                            return Some(with_ext.to_string_lossy().to_string());
+                        }
+                    }
                 }
             }
         }

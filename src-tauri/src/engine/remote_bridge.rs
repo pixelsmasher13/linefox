@@ -878,3 +878,404 @@ pub fn get_execution_details_command(app_handle: AppHandle, execution_run_id: i6
         "steps": steps_json,
     }))
 }
+
+/// Classification result for send_prompt
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PromptClassificationResult {
+    pub classification: String, // "new_task" | "continue_task" | "quick_reply" | "needs_clarification"
+    pub reply: Option<String>,  // For quick_reply, the response text
+    pub clarification_question: Option<String>, // For needs_clarification, the question to ask
+    pub confidence: f32,
+}
+
+/// Classify a user prompt using LLM to determine if it's:
+/// - new_task: A new desktop automation task
+/// - continue_task: A follow-up to the previous task
+/// - quick_reply: A conversational message that doesn't need execution
+/// - needs_clarification: The task is ambiguous and needs more details before execution
+#[tauri::command]
+pub async fn classify_desktop_prompt(
+    app_handle: AppHandle,
+    prompt: String,
+    last_objective: Option<String>,
+    last_completion_message: Option<String>,
+    time_since_completion_ms: Option<u64>,
+    chat_history: Option<Vec<String>>,
+) -> Result<PromptClassificationResult, String> {
+    use crate::repository::settings_repository::get_setting;
+
+    info!("[RemoteBridge] classify_desktop_prompt: {}", prompt);
+
+    let api_choice = app_handle
+        .db(|db| match get_setting(db, "api_choice") {
+            Ok(setting) => setting.setting_value,
+            Err(_) => "proxy".to_string(),
+        });
+
+    let get_key = |key: &str| -> Option<String> {
+        match app_handle.db(|db| get_setting(db, key)) {
+            Ok(setting) if !setting.setting_value.is_empty() => Some(setting.setting_value),
+            _ => None,
+        }
+    };
+
+    let api_key = match api_choice.as_str() {
+        "proxy" => {
+            let user_id = get_key("user_id");
+            match user_id {
+                Some(uid) => app_handle
+                    .db(|db| crate::repository::user_auth_repository::get_valid_auth_token(db, &uid))
+                    .ok()
+                    .flatten(),
+                None => None,
+            }
+        },
+        "claude" => get_key("api_key_claude"),
+        "claude-subscription" => get_key("api_key_claude_oauth"),
+        "openai" => get_key("api_key_open_ai"),
+        "openai-codex" => crate::auth::openai_codex_oauth::load(&app_handle).map(|c| c.access),
+        "gemini" => get_key("api_key_gemini"),
+        "grok" => get_key("api_key_grok"),
+        "deepseek" => get_key("api_key_deepseek"),
+        _ => {
+            warn!("[RemoteBridge] Unknown API choice '{}', falling back to heuristics", api_choice);
+            return Ok(classify_with_heuristics(&prompt, &last_objective, time_since_completion_ms));
+        }
+    };
+
+    let api_key = match api_key {
+        Some(key) if !key.is_empty() => key,
+        _ => {
+            warn!("[RemoteBridge] No API key for '{}', falling back to heuristics", api_choice);
+            return Ok(classify_with_heuristics(&prompt, &last_objective, time_since_completion_ms));
+        }
+    };
+
+    let mut context = if let Some(ref obj) = last_objective {
+        let completion = last_completion_message.as_deref().unwrap_or("(no completion message)");
+        let time_ago = time_since_completion_ms.map(|ms| format!("{} seconds ago", ms / 1000)).unwrap_or_default();
+        format!(
+            "Previous task: {}\nCompletion message: {}\nCompleted: {}",
+            obj, completion, time_ago
+        )
+    } else {
+        "No previous task in this session.".to_string()
+    };
+
+    if let Some(ref history) = chat_history {
+        if !history.is_empty() {
+            context.push_str("\n\nRecent conversation:\n");
+            context.push_str(&history.join("\n"));
+        }
+    }
+
+    let system_prompt = r#"You are Linefox, an AI agent that automates tasks on the user's desktop. You can control apps, browse the web, create files, run terminal commands, and more. Given a user prompt and context about their previous task, classify the prompt into one of four categories:
+
+1. "new_task" - The user wants to start a completely new desktop automation task that is CLEAR and SPECIFIC enough to execute (e.g., "Open Chrome and go to google.com", "Create a new Excel spreadsheet", "Take a screenshot")
+2. "continue_task" - The user wants to continue or build upon their previous task with a clear ACTION request (e.g., "now search for X", "then click submit", "also do Y", "export that to PDF"). The prompt must request the agent to DO something on the computer related to the previous task. If the recent conversation has been casual chat (jokes, banter, compliments), do NOT classify follow-ups as continue_task just because they mention words related to the previous task — that's still conversational.
+3. "quick_reply" - Casual chat that needs no computer action AND no real-time or factual lookup. Greetings, thanks, farewells, jokes, riddles, questions about the assistant or what it can do, conversational follow-ups ("another one", "tell me more"), and chat-like reactions to previous replies. IMPORTANT: Look at the recent conversation flow — if the last few exchanges were quick_reply back-and-forth, the next message is very likely still conversational unless it clearly requests a desktop action. If the user asks for any factual information that could be looked up (prices, stats, news, market data, current events, comparisons, etc.), classify as "new_task" — the agent can browse the web to find accurate answers. Never give a vague or hedged quick_reply when a web search would give a real answer.
+4. "needs_clarification" - The user wants a desktop task but it's SO VAGUE that execution literally cannot begin. Use ONLY when a critical detail is missing AND no reasonable default exists.
+   YES clarify: "send an email" (to whom?), "open the file" (which file?), "search for something" (for what?)
+   NO, just start (new_task): "find tesla 10K extract key data", "check AAPL stock price", "research best laptops under $1000", "download my bank statement", "go to reddit and find trending posts"
+   BIAS: When in doubt between new_task and needs_clarification, ALWAYS choose new_task. The agent can figure out details during execution or ask then. Only clarify if the task truly cannot begin.
+
+Respond with ONLY a JSON object in this exact format:
+{"classification": "new_task" | "continue_task" | "quick_reply" | "needs_clarification", "reply": "string or null", "clarification_question": "string or null", "confidence": 0.0-1.0}
+
+- For quick_reply: include a helpful response in "reply", set clarification_question to null
+- For needs_clarification: include a specific clarifying question in "clarification_question", set reply to null
+- For new_task and continue_task: set both reply and clarification_question to null"#;
+
+    let user_prompt = format!(
+        "Context:\n{}\n\nUser prompt: \"{}\"\n\nClassify this prompt.",
+        context, prompt
+    );
+
+    let llm_result = match api_choice.as_str() {
+        "proxy" => crate::engine::llm_providers::proxy::call_llm_api(&api_key, user_prompt, system_prompt, 500).await,
+        "claude" | "claude-subscription" => crate::engine::llm_providers::claude::call_llm_api(&api_key, user_prompt, system_prompt, 500).await,
+        "openai" => crate::engine::llm_providers::openai::call_llm_api(&api_key, user_prompt, system_prompt, 500).await,
+        "openai-codex" => crate::engine::llm_providers::openai_codex::call_llm_api(&api_key, user_prompt, system_prompt, 500).await,
+        "gemini" => crate::engine::llm_providers::gemini::call_llm_api(&api_key, user_prompt, system_prompt, 500).await,
+        "grok" => crate::engine::llm_providers::grok::call_llm_api(&api_key, user_prompt, system_prompt, 500).await,
+        "deepseek" => crate::engine::llm_providers::deepseek::call_llm_api(&api_key, user_prompt, system_prompt, 500).await,
+        _ => {
+            warn!("[RemoteBridge] Unknown API choice for LLM call: {}", api_choice);
+            return Ok(classify_with_heuristics(&prompt, &last_objective, time_since_completion_ms));
+        }
+    };
+
+    match llm_result {
+        Ok((response, _, _)) => {
+            match extract_json_and_parse::<PromptClassificationResult>(&response) {
+                Ok(result) => {
+                    info!("[RemoteBridge] LLM classification ({}): {:?}", api_choice, result);
+                    Ok(result)
+                },
+                Err(e) => {
+                    warn!("[RemoteBridge] Failed to parse LLM response '{}', falling back to heuristics: {}", response, e);
+                    Ok(classify_with_heuristics(&prompt, &last_objective, time_since_completion_ms))
+                }
+            }
+        },
+        Err(e) => {
+            warn!("[RemoteBridge] LLM call ({}) failed, falling back to heuristics: {}", api_choice, e);
+            Ok(classify_with_heuristics(&prompt, &last_objective, time_since_completion_ms))
+        }
+    }
+}
+
+/// Classify a follow-up prompt WHILE there is an active task context.
+/// Decision space collapses to "continuation" vs "quick_reply"; on any
+/// ambiguity we prefer "continuation" (a misrouted quick_reply silently
+/// cancels intended work; a misrouted continuation produces a plan the user
+/// can stop).
+#[tauri::command]
+pub async fn classify_continuation_prompt(
+    app_handle: AppHandle,
+    prompt: String,
+    previous_objective: String,
+    previous_completion_message: Option<String>,
+    recent_steps: Option<Vec<String>>,
+    chat_history: Option<Vec<String>>,
+    is_playing: Option<bool>,
+) -> Result<PromptClassificationResult, String> {
+    use crate::repository::settings_repository::get_setting;
+
+    info!("[RemoteBridge] classify_continuation_prompt: {}", prompt);
+
+    let api_choice = app_handle
+        .db(|db| match get_setting(db, "api_choice") {
+            Ok(setting) => setting.setting_value,
+            Err(_) => "proxy".to_string(),
+        });
+
+    let get_key = |key: &str| -> Option<String> {
+        match app_handle.db(|db| get_setting(db, key)) {
+            Ok(setting) if !setting.setting_value.is_empty() => Some(setting.setting_value),
+            _ => None,
+        }
+    };
+
+    let api_key = match api_choice.as_str() {
+        "proxy" => {
+            let user_id = get_key("user_id");
+            match user_id {
+                Some(uid) => app_handle
+                    .db(|db| crate::repository::user_auth_repository::get_valid_auth_token(db, &uid))
+                    .ok()
+                    .flatten(),
+                None => None,
+            }
+        },
+        "claude" => get_key("api_key_claude"),
+        "claude-subscription" => get_key("api_key_claude_oauth"),
+        "openai" => get_key("api_key_open_ai"),
+        "openai-codex" => crate::auth::openai_codex_oauth::load(&app_handle).map(|c| c.access),
+        "gemini" => get_key("api_key_gemini"),
+        "grok" => get_key("api_key_grok"),
+        "deepseek" => get_key("api_key_deepseek"),
+        _ => None,
+    };
+
+    let api_key = match api_key {
+        Some(key) if !key.is_empty() => key,
+        _ => {
+            warn!("[RemoteBridge] No API key for continuation classifier — defaulting to continuation");
+            return Ok(PromptClassificationResult {
+                classification: "continuation".to_string(),
+                reply: None,
+                clarification_question: None,
+                confidence: 0.5,
+            });
+        }
+    };
+
+    let mut context = format!("Previous task objective:\n{}\n", previous_objective);
+
+    if let Some(completion) = previous_completion_message.as_deref().filter(|s| !s.is_empty()) {
+        context.push_str(&format!("\nLast completion message:\n{}\n", completion));
+    }
+
+    if let Some(steps) = recent_steps.as_ref().filter(|s| !s.is_empty()) {
+        context.push_str("\nRecent execution steps (most recent last):\n");
+        for step in steps.iter().take(20) {
+            context.push_str(&format!("- {}\n", step));
+        }
+    }
+
+    if let Some(history) = chat_history.as_ref().filter(|h| !h.is_empty()) {
+        context.push_str("\nRecent chat exchanges:\n");
+        for msg in history.iter().take(10) {
+            context.push_str(&format!("{}\n", msg));
+        }
+    }
+
+    if is_playing.unwrap_or(false) {
+        context.push_str("\nThe task is currently RUNNING — the user's message may be an interrupt/redirect.\n");
+    } else {
+        context.push_str("\nThe task has COMPLETED — the user's message may extend it or just chat.\n");
+    }
+
+    let system_prompt = r#"You are a routing classifier for Linefox, a desktop automation agent. A task is already in progress or has just completed in this chat. Classify the user's follow-up message as ONE of:
+
+1. "continuation" — the user wants the agent to DO more automation work (extend the task, act on results, fix/redo something, add a step, search further, email/save/export the findings, answer a question by doing more work). This includes:
+   - "do another", "find more", "also email it to X", "now put it in Excel"
+   - "that's wrong, try again with Y"
+   - Questions that can only be answered by MORE browsing/research beyond what's in the completion message
+   - Interrupts during a running task ("stop and do Z instead", "skip this, go to next")
+
+2. "quick_reply" — the user is chatting conversationally and NO further automation is needed. The answer can come purely from:
+   - What's in the "Last completion message" or "Recent execution steps" above (i.e., already-collected data)
+   - General-knowledge questions about yourself ("what can you do?", "who are you?")
+   - Casual acknowledgments ("thanks", "cool", "nice", "ok got it", "haha")
+   - A clear question about the work that was JUST shown, answerable by quoting/summarizing
+
+TIE-BREAKER: When genuinely ambiguous, prefer "continuation". A misrouted quick_reply silently cancels intended work; a misrouted continuation produces a plan the user can stop. Only pick quick_reply when it's OBVIOUSLY conversational.
+
+Respond with ONLY a JSON object:
+{"classification": "continuation" | "quick_reply", "reply": "string or null", "confidence": 0.0-1.0}
+
+- For quick_reply: include a helpful 1-2 sentence response in "reply" that actually answers the user (e.g., reference the completion message or collected data). Do NOT hedge with "I can help with that!" — give the real answer.
+- For continuation: set reply to null."#;
+
+    let user_prompt = format!(
+        "{}\n---\n\nUser's follow-up message:\n\"{}\"\n\nClassify as continuation or quick_reply.",
+        context, prompt
+    );
+
+    let llm_result = match api_choice.as_str() {
+        "proxy" => crate::engine::llm_providers::proxy::call_llm_api(&api_key, user_prompt, system_prompt, 500).await,
+        "claude" | "claude-subscription" => crate::engine::llm_providers::claude::call_llm_api(&api_key, user_prompt, system_prompt, 500).await,
+        "openai" => crate::engine::llm_providers::openai::call_llm_api(&api_key, user_prompt, system_prompt, 500).await,
+        "openai-codex" => crate::engine::llm_providers::openai_codex::call_llm_api(&api_key, user_prompt, system_prompt, 500).await,
+        "gemini" => crate::engine::llm_providers::gemini::call_llm_api(&api_key, user_prompt, system_prompt, 500).await,
+        "grok" => crate::engine::llm_providers::grok::call_llm_api(&api_key, user_prompt, system_prompt, 500).await,
+        "deepseek" => crate::engine::llm_providers::deepseek::call_llm_api(&api_key, user_prompt, system_prompt, 500).await,
+        _ => {
+            warn!("[RemoteBridge] Unknown API choice for continuation classifier: {} — defaulting to continuation", api_choice);
+            return Ok(PromptClassificationResult {
+                classification: "continuation".to_string(),
+                reply: None,
+                clarification_question: None,
+                confidence: 0.5,
+            });
+        }
+    };
+
+    match llm_result {
+        Ok((response, _, _)) => {
+            match extract_json_and_parse::<PromptClassificationResult>(&response) {
+                Ok(mut result) => {
+                    let cls = result.classification.to_lowercase();
+                    if cls.starts_with("continu") {
+                        result.classification = "continuation".to_string();
+                    } else if cls != "quick_reply" {
+                        warn!("[RemoteBridge] Continuation classifier returned unknown label '{}' — defaulting to continuation", result.classification);
+                        result.classification = "continuation".to_string();
+                        result.reply = None;
+                    }
+                    info!("[RemoteBridge] Continuation classification: {:?}", result);
+                    Ok(result)
+                },
+                Err(e) => {
+                    warn!("[RemoteBridge] Failed to parse continuation classifier response '{}': {} — defaulting to continuation", response, e);
+                    Ok(PromptClassificationResult {
+                        classification: "continuation".to_string(),
+                        reply: None,
+                        clarification_question: None,
+                        confidence: 0.5,
+                    })
+                }
+            }
+        },
+        Err(e) => {
+            warn!("[RemoteBridge] Continuation classifier LLM call failed: {} — defaulting to continuation", e);
+            Ok(PromptClassificationResult {
+                classification: "continuation".to_string(),
+                reply: None,
+                clarification_question: None,
+                confidence: 0.5,
+            })
+        }
+    }
+}
+
+/// Extract JSON object from a string that may contain extra text around it.
+fn extract_json_and_parse<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, String> {
+    if let Ok(result) = serde_json::from_str::<T>(text) {
+        return Ok(result);
+    }
+
+    let start = text.find('{').ok_or("No JSON object found")?;
+    let end = text.rfind('}').ok_or("No closing brace found")?;
+
+    if end <= start {
+        return Err("Invalid JSON boundaries".to_string());
+    }
+
+    let json_str = &text[start..=end];
+    serde_json::from_str::<T>(json_str)
+        .map_err(|e| format!("JSON parse error: {}", e))
+}
+
+/// Fallback heuristic-based classification
+fn classify_with_heuristics(
+    prompt: &str,
+    last_objective: &Option<String>,
+    time_since_completion_ms: Option<u64>,
+) -> PromptClassificationResult {
+    let lower = prompt.to_lowercase();
+    let has_recent_task = last_objective.is_some()
+        && time_since_completion_ms.map(|ms| ms < 5 * 60 * 1000).unwrap_or(false);
+
+    let quick_reply_patterns = [
+        "hi", "hello", "hey", "thanks", "thank you", "ok", "okay", "great", "cool", "nice",
+    ];
+    if quick_reply_patterns.iter().any(|p| lower.starts_with(p)) && lower.len() < 30 {
+        return PromptClassificationResult {
+            classification: "quick_reply".to_string(),
+            reply: Some("I can help with that! What desktop task would you like me to perform?".to_string()),
+            clarification_question: None,
+            confidence: 0.7,
+        };
+    }
+
+    if lower.ends_with('?') && lower.len() < 100 {
+        return PromptClassificationResult {
+            classification: "quick_reply".to_string(),
+            reply: Some("I'd be happy to help! Could you describe a specific task you'd like me to perform on your desktop?".to_string()),
+            clarification_question: None,
+            confidence: 0.6,
+        };
+    }
+
+    if has_recent_task {
+        let continuation_starters = ["now", "then", "next", "also", "and", "after", "continue", "keep"];
+        if continuation_starters.iter().any(|p| lower.starts_with(p)) {
+            return PromptClassificationResult {
+                classification: "continue_task".to_string(),
+                reply: None,
+                clarification_question: None,
+                confidence: 0.8,
+            };
+        }
+
+        let reference_words = ["that", "those", "these", "it", "them", "this"];
+        if reference_words.iter().any(|p| lower.contains(p)) && lower.len() < 100 {
+            return PromptClassificationResult {
+                classification: "continue_task".to_string(),
+                reply: None,
+                clarification_question: None,
+                confidence: 0.6,
+            };
+        }
+    }
+
+    PromptClassificationResult {
+        classification: "new_task".to_string(),
+        reply: None,
+        clarification_question: None,
+        confidence: 0.5,
+    }
+}

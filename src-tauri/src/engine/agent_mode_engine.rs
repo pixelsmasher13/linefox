@@ -15,6 +15,8 @@ use tauri::AppHandle;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
+use crate::engine::types::safe_truncate;
+
 use crate::configuration::state::ServiceAccess;
 use crate::engine::orchestrator_prompt::{
     OrchestratorDecision, get_orchestrator_system_prompt_with_role,
@@ -132,7 +134,7 @@ pub async fn get_initial_plan(
     // Call orchestrator LLM (always use Claude for orchestration)
     let response = call_orchestrator_llm(app_handle, &system_prompt, &planning_prompt).await?;
 
-    info!("Orchestrator response: {}", &response[..std::cmp::min(500, response.len())]);
+    info!("Orchestrator response: {}", safe_truncate(&response, 500));
 
     // Parse the response
     match parse_orchestrator_response(&response) {
@@ -155,16 +157,20 @@ pub async fn get_initial_plan(
             info!("Initial phase: {} with {} steps", phase.name, phase.steps.len());
             Ok(phase)
         },
-        OrchestratorDecision::RequestUserInput { question } => {
-            Err(format!("Orchestrator needs clarification: {}", question))
+        OrchestratorDecision::DirectResponse { response, .. } => {
+            info!("Orchestrator returned DIRECT_RESPONSE — no execution needed");
+            Err(format!("DIRECT_RESPONSE:{}", response))
+        },
+        OrchestratorDecision::Complete { summary } => {
+            warn!("Orchestrator returned COMPLETE for initial plan (likely false positive from keyword match). Summary: {}", 
+                  safe_truncate(&summary, 200));
+            Err(format!("Orchestrator unexpectedly marked task as complete before execution: {}", 
+                  safe_truncate(&summary, 100)))
         },
         OrchestratorDecision::ParseError { raw_response } => {
-            error!("Failed to parse orchestrator response: {}", &raw_response[..std::cmp::min(200, raw_response.len())]);
+            error!("Failed to parse orchestrator response: {}", safe_truncate(&raw_response, 200));
             Err("Failed to parse orchestrator's plan".to_string())
         },
-        _ => {
-            Err("Unexpected orchestrator response for initial planning".to_string())
-        }
     }
 }
 
@@ -205,10 +211,50 @@ pub async fn request_next_phase(
     // Call orchestrator
     let response = call_orchestrator_llm(app_handle, &system_prompt, &review_prompt).await?;
 
-    info!("Orchestrator review response: {}", &response[..std::cmp::min(500, response.len())]);
+    info!("Orchestrator review response: {}", safe_truncate(&response, 500));
 
-    // Parse response
-    let decision = parse_orchestrator_response(&response);
+    // Parse response; on ParseError, retry once with a strict reformat prompt
+    // so a formatting slip (markdown fence, preamble, stray quotes) doesn't
+    // become a silent no-op that recycles the same state next iteration.
+    let decision = match parse_orchestrator_response(&response) {
+        OrchestratorDecision::ParseError { raw_response } => {
+            warn!(
+                "Orchestrator returned unparseable response ({} chars); retrying once with reformat prompt",
+                raw_response.len()
+            );
+            let correction_prompt = format!(
+                "Your previous response could not be parsed. Here is what you sent:\n\
+                 ---\n{}\n---\n\n\
+                 Reply AGAIN using EXACTLY one of these formats. No preamble, no markdown fences, \
+                 no JSON wrapping — begin your reply with the prefix.\n\n\
+                 1) New or revised plan:\n\
+                    PHASE <N>: <short name>\n\
+                    1. <step>\n\
+                    2. <step>\n\
+                    ...\n\n\
+                 2) Task is fully done:\n\
+                    COMPLETE: <one-line summary>\n\n\
+                 3) Conversational answer (no automation needed):\n\
+                    DIRECT_RESPONSE: <text>",
+                safe_truncate(&raw_response, 800)
+            );
+            match call_orchestrator_llm(app_handle, &system_prompt, &correction_prompt).await {
+                Ok(retry_response) => {
+                    info!("Orchestrator retry response: {}", safe_truncate(&retry_response, 500));
+                    let retry_decision = parse_orchestrator_response(&retry_response);
+                    if matches!(retry_decision, OrchestratorDecision::ParseError { .. }) {
+                        warn!("Orchestrator retry also unparseable — surfacing ParseError");
+                    }
+                    retry_decision
+                },
+                Err(e) => {
+                    warn!("Orchestrator retry call failed: {} — surfacing original ParseError", e);
+                    OrchestratorDecision::ParseError { raw_response }
+                }
+            }
+        },
+        other => other,
+    };
 
     // Update state based on decision
     match &decision {
@@ -242,23 +288,6 @@ pub async fn request_next_phase(
             PHASE_NUMBER.store(*phase_number, Ordering::SeqCst);
             PHASE_STEP_NUMBER.store(1, Ordering::SeqCst);
         },
-        OrchestratorDecision::RetryCurrentPhase { phase_name, phase_number, goal, steps, memory_instructions, reason } => {
-            info!("Orchestrator requested retry of current phase: {}", reason);
-
-            // Update current phase with new steps
-            let retry_phase = AgentPhase {
-                name: phase_name.clone(),
-                number: *phase_number,
-                goal: goal.clone(),
-                steps: steps.clone(),
-                memory_instructions: memory_instructions.clone(),
-                next_phase_hint: String::new(),
-                completed_steps: Vec::new(),
-            };
-            *CURRENT_PHASE.lock().unwrap() = Some(retry_phase);
-
-            PHASE_STEP_NUMBER.store(1, Ordering::SeqCst);
-        },
         OrchestratorDecision::Complete { summary } => {
             info!("Orchestrator marked task as complete: {}", summary);
 
@@ -276,10 +305,11 @@ pub async fn request_next_phase(
 
             *CURRENT_PHASE.lock().unwrap() = None;
         },
-        OrchestratorDecision::RequestUserInput { question } => {
-            info!("Orchestrator needs user input: {}", question);
+        OrchestratorDecision::DirectResponse { response, .. } => {
+            info!("Orchestrator returned direct response mid-execution (treating as complete): {}", safe_truncate(response, 100));
+            *CURRENT_PHASE.lock().unwrap() = None;
         },
-        OrchestratorDecision::ParseError { raw_response } => {
+        OrchestratorDecision::ParseError { raw_response: _ } => {
             warn!("Failed to parse orchestrator response");
         }
     }
@@ -351,6 +381,14 @@ pub fn get_current_phase_info() -> Option<(String, u32, String, usize, usize)> {
     ))
 }
 
+/// Full snapshot of the current phase (cloned). Returns None outside agent
+/// mode or between phases. Used by `create_incremental_prompt` to inject
+/// phase context into the executor's user-side turn, since the system
+/// prompt alone can be obscured by the tight conversation sliding window.
+pub fn get_current_phase_snapshot() -> Option<AgentPhase> {
+    CURRENT_PHASE.lock().unwrap().clone()
+}
+
 /// Get phase history for UI display
 pub fn get_phase_history() -> Vec<(String, u32, bool)> {
     PHASE_HISTORY.lock().unwrap()
@@ -369,17 +407,17 @@ pub fn handle_memory_command(command: &str) -> Result<String, String> {
         // Fall back to simple memory save (for backward compatibility)
         let content = command.strip_prefix("MEMORY_SAVE:").unwrap_or(command);
         save_to_memory(None, content)?;
-        return Ok(format!("Saved to memory: {}...", &content[..std::cmp::min(50, content.len())]));
+        return Ok(format!("Saved to memory: {}...", safe_truncate(content, 50)));
     }
 
     match parse_sectioned_memory_command(command) {
         Some((operation, section, content)) => {
             if operation == "MEMORY_SAVE" {
                 save_to_memory(Some(&section), &content)?;
-                Ok(format!("Saved to {}: {}...", section, &content[..std::cmp::min(50, content.len())]))
+                Ok(format!("Saved to {}: {}...", section, safe_truncate(&content, 50)))
             } else if operation == "MEMORY_REVISE" {
                 revise_memory_section(&section, &content)?;
-                Ok(format!("Revised {}: {}...", section, &content[..std::cmp::min(50, content.len())]))
+                Ok(format!("Revised {}: {}...", section, safe_truncate(&content, 50)))
             } else {
                 Err(format!("Unknown memory operation: {}", operation))
             }
@@ -457,6 +495,17 @@ async fn call_orchestrator_llm(
                 4000,
             ).await?
         },
+        "openai-codex" => {
+            let (token, _acct) = crate::auth::openai_codex_oauth::get_active_credentials(app_handle)
+                .await
+                .map_err(|e| format!("ChatGPT subscription auth: {}", e))?;
+            crate::engine::llm_providers::openai_codex::call_llm_api(
+                &token,
+                user_prompt.to_string(),
+                system_prompt,
+                4000,
+            ).await?
+        },
         "grok" => {
             let api_key = app_handle
                 .db(|db| get_setting(db, "api_key_grok").expect("Failed to get Grok API key"))
@@ -465,6 +514,21 @@ async fn call_orchestrator_llm(
                 return Err("Grok API key is not configured".to_string());
             }
             crate::engine::llm_providers::grok::call_llm_api(
+                &api_key,
+                user_prompt.to_string(),
+                system_prompt,
+                4000,
+            ).await?
+        },
+        "claude-subscription" => {
+            let api_key = app_handle
+                .db(|db| get_setting(db, "api_key_claude_oauth"))
+                .map(|s| s.setting_value)
+                .unwrap_or_default();
+            if api_key.is_empty() {
+                return Err("Claude OAuth token is not configured. Run `claude setup-token` and paste the token in Settings.".to_string());
+            }
+            crate::engine::llm_providers::claude::call_llm_api(
                 &api_key,
                 user_prompt.to_string(),
                 system_prompt,
@@ -490,14 +554,47 @@ async fn call_orchestrator_llm(
     Ok(response.0) // Return just the response text
 }
 
-/// Check if a response from executor is a PLAN command
+/// Check if a response from executor is a PLAN command.
+///
+/// Requires the `||` delimiter so prose starting with "Plan to..." or
+/// "Planning..." isn't misrouted into the orchestrator path. The prompt
+/// documents `PLAN || <summary> || <reason>` as the official format;
+/// bare `PLAN` (no args) is also accepted as a degenerate case.
 pub fn is_plan_command(response: &str) -> bool {
-    response.trim().to_uppercase().starts_with("PLAN")
+    let trimmed = response.trim().to_uppercase();
+    trimmed == "PLAN"
+        || trimmed.starts_with("PLAN ||")
+        || trimmed.starts_with("PLAN||")
+}
+
+/// Check if a response from executor is a STUCK command.
+/// Same rationale as `is_plan_command` — require the `||` delimiter (or bare
+/// `STUCK`) so arbitrary prose doesn't trigger the STUCK branch.
+pub fn is_stuck_command(response: &str) -> bool {
+    let trimmed = response.trim().to_uppercase();
+    trimmed == "STUCK"
+        || trimmed.starts_with("STUCK ||")
+        || trimmed.starts_with("STUCK||")
 }
 
 /// Parse PLAN command from executor response
 pub fn parse_executor_plan_request(response: &str) -> Option<PlanRequest> {
     parse_plan_command(response)
+}
+
+/// Convert a STUCK response into a PlanRequest so it can be routed to the orchestrator
+pub fn stuck_to_plan_request(response: &str) -> PlanRequest {
+    let reason = response
+        .splitn(2, "||")
+        .nth(1)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| response.trim().to_string());
+
+    PlanRequest {
+        progress_summary: "Executor stuck — needs orchestrator guidance".to_string(),
+        reason,
+    }
 }
 
 /// Get summary of recent actions for orchestrator review
@@ -510,7 +607,14 @@ pub fn summarize_recent_actions(actions: &[EnhancedAction], max_actions: usize) 
 
     recent.iter().rev()
         .enumerate()
-        .map(|(i, a)| format!("{}. {} - {}", i + 1, a.command, a.justification))
+        .map(|(i, a)| {
+            let just = if a.justification.len() > 400 {
+                format!("{}...", safe_truncate(&a.justification, 400))
+            } else {
+                a.justification.clone()
+            };
+            format!("{}. {} - {}", i + 1, a.command, just)
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -562,7 +666,7 @@ pub fn track_plan_call(reason: &str, progress: &str) -> Result<(), String> {
                 let msg = format!(
                     "PLAN loop detected: executor called PLAN 3 times in {}s with similar reason: '{}'",
                     time_span.as_secs(),
-                    &recent[0].reason[..std::cmp::min(50, recent[0].reason.len())]
+                    safe_truncate(&recent[0].reason, 50)
                 );
                 warn!("{}", msg);
                 return Err(msg);
@@ -620,6 +724,7 @@ mod tests {
 
         let result = handle_memory_command("MEMORY_SAVE:DATA:Apple revenue $100B");
         assert!(result.is_ok());
+        assert!(result.unwrap().contains("DATA"));
 
         let contents = get_memory_contents();
         assert!(contents.contains("Apple revenue"));
