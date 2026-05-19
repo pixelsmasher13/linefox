@@ -48,10 +48,10 @@
   <text x="640" y="465"
         text-anchor="middle"
         font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, sans-serif"
-        font-size="34"
+        font-size="30"
         font-weight="600"
         fill="#27272A"
-        letter-spacing="-1">Describe <tspan fill="#3363AD">·</tspan> Run <tspan fill="#3363AD">·</tspan> Schedule <tspan fill="#3363AD">·</tspan> Your Keys</text>
+        letter-spacing="-0.8">Desktop control for any app <tspan fill="#3363AD">·</tspan> Autonomous <tspan fill="#3363AD">·</tspan> Token Efficient</text>
 
   <!-- Branding mark at the bottom -->
   <text x="640" y="568"
