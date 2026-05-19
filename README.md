@@ -24,17 +24,17 @@ Everything runs locally. Your API keys, your data, your machine.
 
 ## Features at a glance
 
-### Plain English in, real work out
+### Drives the real apps on your Mac
 
-Tell Linefox what you want. It plans the steps, drives your real browser and apps, and reports back inline.
+Not a sandboxed browser-only agent. Linefox runs your *actual* Chrome (logged-in sessions intact), your terminal, your open Excel and Word documents — the apps you already use.
 
 <p align="center">
   <img src="docs/images/feature-task-chat.svg" alt="Linefox executing a deploy task — chat thread with terminal steps, URL verification, and live status" width="100%"/>
 </p>
 
-### Two-tier planning for long tasks
+### Runs autonomously, stays on task
 
-The orchestrator breaks the goal into phases. The executor runs each phase step-by-step and calls back when it's done or stuck.
+Phased planning (orchestrator → executor) keeps the agent anchored on the goal over dozens of steps, while the [memory architecture](#memory-architecture) below keeps per-turn token cost flat. The two together let Linefox run long tasks continuously without drifting and without burning your budget.
 
 <p align="center">
   <img src="docs/images/feature-planner.svg" alt="Linefox orchestrator phase plan — 3 phases of a research task, with the executor running steps under phase 1" width="100%"/>
@@ -54,7 +54,7 @@ Pair a Telegram or Discord bot and trigger automations from your phone. Your des
 
 ## Memory architecture
 
-Most agents (ReAct, OpenAI function-calling, Claude tool use) accumulate every tool-call observation in a growing message thread. By step 30 you're paying to re-send every page you scraped, every click you confirmed, every terminal output you've ever seen — context that mostly mattered for one or two steps and is now just bloat. That's why long tasks get expensive and start to drift.
+Most agents (Claude Code, OpenAI Codex, OpenClaw, Browser Use) accumulate every tool-call observation in a growing message thread. By step 30 you're paying to re-send every page you scraped, every click you confirmed, every terminal output you've ever seen — context that mostly mattered for one or two steps and is now just bloat. That's why long tasks get expensive and start to drift.
 
 Linefox doesn't show the agent its history as a thread. Each turn, three **bounded** streams feed in plus one cached prompt:
 
@@ -65,34 +65,30 @@ Linefox doesn't show the agent its history as a thread. Each turn, three **bound
 - **MEMORY** — what the agent *chose to remember*. The LLM emits `MEMORY_SAVE` for findings, decisions, key data. Typically 1–3k tokens for a 30-step task. Raw HTML, accessibility-tree dumps, click confirmations never land here.
 - **CURRENT STATE** — a fresh snapshot of the world *right now*: current app, visible accessible elements, Excel sheet info, Word document info. Replaced wholesale every turn, ~2–5k tokens.
 - **RECENT ACTIONS** — the last ~50 actions as compact one-liners (`CLICK:42 ✓ Submit | form opened`). When the buffer fills, oldest entries auto-compress into a single summary line (e.g. `Excel commands ×12 | Click commands ×8`) — they're never silently dropped.
-- **SYSTEM PROMPT** (the only static part, ~10–20k tokens) is wrapped in `cache_control: ephemeral` and billed at ~10% via the provider's prefix cache. Effectively flat per turn.
+- **SYSTEM PROMPT** (the only static part, ~5–8k tokens) is wrapped in `cache_control: ephemeral` and billed at ~10% via the provider's prefix cache. Effectively flat per turn.
 
 The result: per-turn cost stays roughly flat regardless of step count.
 
-| Step | Linefox  | Naive ReAct thread     |
+| Step | Linefox  | Typical thread agent   |
 | ---- | -------- | ---------------------- |
 | 1    | ~3k tok  | ~5k tok                |
 | 10   | ~3k tok  | ~35k tok (11×)         |
 | 30   | ~3k tok  | ~95k tok (32×)         |
 
-By step 30 a naive ReAct agent is paying **~30× more per LLM call** than Linefox, and the gap keeps widening linearly.
+By step 30 a thread-style agent is paying **~30× more per LLM call** than Linefox, and the gap keeps widening linearly.
 
 This isn't just cheaper — it's why long tasks actually finish. When the context isn't drowning in stale observations, the model can focus on what's on screen *now* and what it explicitly wrote down. Old clicks don't haunt the next decision. The mental model matches how a human operator works: you don't remember every click — you look at the screen and decide; the exceptions worth keeping, you write down.
 
 ## How it compares
 
-|                                                         | Linefox          | Claude Cowork  | Operator    | Browser Use | Manus       |
-| ------------------------------------------------------- | ---------------- | -------------- | ----------- | ----------- | ----------- |
-| No-code interface                                       | ✅               | ✅             | ✅          | ❌          | ✅          |
-| Persistent encrypted sessions (your real logins)        | ✅               | partial        | partial     | ❌          | ❌          |
-| Stateful recurring runs (today builds on yesterday)     | ✅               | ❌             | ❌          | ❌          | ❌          |
-| Drives native desktop apps (Excel, Word, terminal)      | ✅               | ❌             | ❌          | ❌          | ❌          |
-| Telegram / Discord triggers                             | ✅               | ❌             | ❌          | ❌          | ❌          |
-| Bring your own LLM key                                  | ✅               | ❌             | ❌          | ✅          | ❌          |
-| ChatGPT / Claude **subscription** login                 | ✅               | Claude only    | ❌          | ❌          | ❌          |
-| Runs entirely on your machine                           | ✅               | ❌             | ❌          | partial     | ❌          |
-| Open source                                             | ✅               | ❌             | ❌          | ✅          | ❌          |
-| Pricing                                                 | Free / your keys | Claude Max plan | $200/mo flat | Per-task   | $19.99/mo+  |
+|                                       | Linefox Desktop                                  | Claude Cowork                          | OpenClaw                              |
+| ------------------------------------- | ------------------------------------------------ | -------------------------------------- | ------------------------------------- |
+| Control methods                       | Accessibility + AppleScript + COM + CLI + APIs   | Screenshots + Puppeteer + CLI          | APIs where available + CLI            |
+| Token efficiency                      | Text-first, compact memory                       | Screenshot-heavy                       | Varies                                |
+| Model support                         | Claude, OpenAI (incl. ChatGPT login), Gemini, Grok | Claude only                          | BYO (any)                             |
+| Recurring tasks with custom instructions | ✅                                            | basic schedules                        | DIY                                   |
+| Command from phone                    | Telegram, Discord                                | Phone pairing                          | 15+ (Telegram, WhatsApp, Slack, Signal…) |
+| Pricing                               | Free · BYO-key · ChatGPT login                   | $17–$200/mo Claude plan                | Free (BYO-key)                        |
 
 ## LLM providers
 
