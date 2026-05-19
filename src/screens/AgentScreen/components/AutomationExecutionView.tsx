@@ -11,9 +11,17 @@ import {
   useToast,
   Textarea,
   IconButton,
+  Collapse,
+  Modal,
+  ModalOverlay,
+  ModalContent,
+  ModalHeader,
+  ModalBody,
+  ModalFooter,
+  ModalCloseButton,
 } from "@chakra-ui/react";
 import { Text } from "@heelix-app/design";
-import { Square, CheckCircle, AlertCircle, Clock, Send } from "lucide-react";
+import { Square, CheckCircle, AlertCircle, Clock, Send, ChevronDown, ChevronRight, Copy, Database, FileText, Columns2, Rows2 } from "lucide-react";
 import { listen, emit } from "@tauri-apps/api/event";
 import { ClipboardModal } from "./ClipboardModal";
 import { ContinuationContext } from "./ExecutionDetailsView";
@@ -68,6 +76,26 @@ export const AutomationExecutionView: React.FC<AutomationExecutionViewProps> = (
   const [userMessage, setUserMessage] = useState("");
   const [currentRunId, setCurrentRunId] = useState<number | undefined>(executionRunId);
   const [currentPhase, setCurrentPhase] = useState<AgentPhase | null>(null);
+  const [completedPhases, setCompletedPhases] = useState<AgentPhase[]>([]);
+  const [isPhaseCardCollapsed, setIsPhaseCardCollapsed] = useState(false);
+  const [splitLayout, setSplitLayout] = useState<boolean>(() => {
+    if (typeof window !== "undefined") {
+      return window.localStorage.getItem("linefox.execution.splitLayout") === "true";
+    }
+    return false;
+  });
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("linefox.execution.splitLayout", String(splitLayout));
+    }
+    if (splitLayout && isPhaseCardCollapsed) {
+      setIsPhaseCardCollapsed(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [splitLayout]);
+  const [isStepsCollapsed, setIsStepsCollapsed] = useState(false);
+  const [isClipboardModalOpen, setIsClipboardModalOpen] = useState(false);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const toast = useToast();
@@ -97,6 +125,8 @@ export const AutomationExecutionView: React.FC<AutomationExecutionViewProps> = (
       setClipboardContent(null);
       setContinuationPrompt("");
       setCurrentPhase(null);
+      setCompletedPhases([]);
+      setIsPhaseCardCollapsed(false);
     }
   }, [isPlaying, automationId]);
   
@@ -114,7 +144,7 @@ export const AutomationExecutionView: React.FC<AutomationExecutionViewProps> = (
         setCurrentRunId(event.payload.execution_run_id);
       }
     });
-
+    
     return () => {
       unsubscribe.then((fn) => fn());
     };
@@ -128,19 +158,34 @@ export const AutomationExecutionView: React.FC<AutomationExecutionViewProps> = (
       const { phaseName, phaseNumber, goal, steps, nextPhaseHint } = event.payload;
       console.log("Agent phase started:", phaseName, "with", steps?.length, "steps");
 
-      setCurrentPhase({
-        phaseName,
-        phaseNumber,
-        goal,
-        steps: steps || [],
-        nextPhaseHint,
+      setCurrentPhase((prev) => {
+        if (prev) {
+          setCompletedPhases((list) => [...list, prev]);
+        }
+        return {
+          phaseName,
+          phaseNumber,
+          goal,
+          steps: steps || [],
+          nextPhaseHint,
+        };
       });
+      setIsPhaseCardCollapsed(false);
     });
 
     return () => {
       unsubscribe.then((fn) => fn());
     };
   }, [isPlaying]);
+
+  // Auto-collapse the phase card after the first execution step arrives,
+  // so the running task stays visible as steps accumulate.
+  useEffect(() => {
+    if (currentPhase && steps.length >= 1 && !isPhaseCardCollapsed && !splitLayout) {
+      setIsPhaseCardCollapsed(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentPhase, steps.length >= 1, splitLayout]);
 
   useEffect(() => {
     if (!isPlaying) return;
@@ -218,6 +263,7 @@ export const AutomationExecutionView: React.FC<AutomationExecutionViewProps> = (
       const { message } = event.payload;
       console.log("Received completion message:", message);
       setCompletionMessage(message);
+      setIsStepsCollapsed(true);
 
       // Mark the last step as completed
       setSteps((prevSteps) => {
@@ -313,6 +359,32 @@ export const AutomationExecutionView: React.FC<AutomationExecutionViewProps> = (
     }
   };
 
+  const formatDuration = () => {
+    if (steps.length < 2) return "";
+    const first = steps[0].timestamp;
+    const last = steps[steps.length - 1].timestamp;
+    // Timestamps are from toLocaleTimeString(), parse them
+    const parseTime = (t: string) => {
+      const d = new Date();
+      const parts = t.match(/(\d+):(\d+):(\d+)\s*(AM|PM)?/i);
+      if (!parts) return d.getTime();
+      let hours = parseInt(parts[1]);
+      const mins = parseInt(parts[2]);
+      const secs = parseInt(parts[3]);
+      if (parts[4]?.toUpperCase() === 'PM' && hours !== 12) hours += 12;
+      if (parts[4]?.toUpperCase() === 'AM' && hours === 12) hours = 0;
+      d.setHours(hours, mins, secs, 0);
+      return d.getTime();
+    };
+    const ms = parseTime(last) - parseTime(first);
+    if (ms <= 0) return "";
+    const totalSec = Math.floor(ms / 1000);
+    const min = Math.floor(totalSec / 60);
+    const sec = totalSec % 60;
+    if (min > 0) return `${min}m ${sec}s`;
+    return `${sec}s`;
+  };
+
   const handleContinue = async () => {
     if (!continuationPrompt.trim() || !onContinue || !currentRunId) return;
     
@@ -372,7 +444,9 @@ export const AutomationExecutionView: React.FC<AutomationExecutionViewProps> = (
               />
             )}
             <Badge colorScheme={completionMessage ? "green" : "blue"} fontSize="sm" px={3} py={1}>
-              {steps.length} {steps.length === 1 ? "Step" : "Steps"} Executed
+              {completionMessage
+                ? (formatDuration() ? `Completed in ${formatDuration()}` : "Completed")
+                : `${steps.length} ${steps.length === 1 ? "Step" : "Steps"}`}
             </Badge>
           </HStack>
         </HStack>
@@ -403,209 +477,466 @@ export const AutomationExecutionView: React.FC<AutomationExecutionViewProps> = (
         }}
       >
         <VStack spacing={4} align="stretch">
-          {/* Chat-style conversation */}
-          {completionMessage && objective && (
-            <VStack spacing={3} align="stretch" mb={4}>
-              {/* User message (objective) */}
-              <Flex justify="flex-end">
-                <Box
-                  bg="white"
-                  padding={3}
-                  borderRadius="2xl"
-                  maxW="80%"
-                  boxShadow="sm"
-                  border="1px solid"
-                  borderColor="gray.200"
-                >
-                  <ChakraText
-                    fontSize="sm"
-                    color="gray.800"
-                    whiteSpace="pre-wrap"
-                    lineHeight="1.5"
-                  >
-                    {objective}
-                  </ChakraText>
-                </Box>
-              </Flex>
+          {/* === COMPLETED: Results-first layout === */}
+          {completionMessage ? (
+            <>
+              {/* Completion summary — hero section */}
+              <Box
+                bg="white"
+                padding={5}
+                borderRadius="lg"
+                border="1px solid"
+                borderColor="gray.200"
+                boxShadow="sm"
+              >
+                <MarkdownContent content={completionMessage} />
+              </Box>
 
-              {/* AI response (completion message) */}
-              <Flex justify="flex-start">
-                <Box
-                  bg="white"
-                  padding={3}
-                  borderRadius="2xl"
-                  maxW="80%"
-                  boxShadow="sm"
-                  border="1px solid"
-                  borderColor="gray.200"
-                >
-                  <MarkdownContent content={completionMessage!} />
-                </Box>
-              </Flex>
-            </VStack>
-          )}
-
-          {/* Current Phase Plan (Agent Mode) */}
-          {currentPhase && (
-            <Box
-              bg="purple.50"
-              padding={4}
-              borderRadius="md"
-              border="1px solid"
-              borderColor="purple.200"
-              mb={4}
-            >
-              <VStack align="start" spacing={3}>
-                <HStack>
-                  <Badge colorScheme="purple" fontSize="sm">
-                    Phase {currentPhase.phaseNumber}
-                  </Badge>
-                  <ChakraText fontWeight="bold" color="purple.800">
-                    {currentPhase.phaseName}
-                  </ChakraText>
-                </HStack>
-
+              {/* Collected data — inline preview + modal */}
+              {clipboardContent && (
                 <Box>
-                  <ChakraText fontSize="xs" fontWeight="bold" color="purple.600" mb={1}>
-                    Goal:
-                  </ChakraText>
-                  <ChakraText fontSize="sm" color="purple.800">
-                    {currentPhase.goal}
-                  </ChakraText>
-                </Box>
-
-                {currentPhase.steps.length > 0 && (
-                  <Box width="100%">
-                    <ChakraText fontSize="xs" fontWeight="bold" color="purple.600" mb={2}>
-                      Plan ({currentPhase.steps.length} steps):
+                  <HStack
+                    spacing={2}
+                    py={2}
+                    px={2}
+                    borderRadius="md"
+                    cursor="pointer"
+                    _hover={{ bg: "gray.50" }}
+                    onClick={() => setIsClipboardModalOpen(true)}
+                  >
+                    <Database size={14} color="#6b7280" />
+                    <ChakraText fontSize="xs" fontWeight="semibold" color="gray.500">
+                      Collected Data
                     </ChakraText>
-                    <VStack align="start" spacing={1} pl={2}>
-                      {currentPhase.steps.map((step, idx) => (
-                        <ChakraText key={idx} fontSize="xs" color="purple.700">
-                          {idx + 1}. {step}
-                        </ChakraText>
+                  </HStack>
+
+                  {/* Full modal */}
+                  <Modal isOpen={isClipboardModalOpen} onClose={() => setIsClipboardModalOpen(false)} size="xl">
+                    <ModalOverlay />
+                    <ModalContent>
+                      <ModalHeader>
+                        <HStack spacing={2}>
+                          <FileText size={20} />
+                          <ChakraText fontWeight="bold">Collected Data</ChakraText>
+                        </HStack>
+                      </ModalHeader>
+                      <ModalCloseButton />
+                      <ModalBody>
+                        <Box
+                          p={4}
+                          bg="gray.50"
+                          borderRadius="md"
+                          maxH="400px"
+                          overflowY="auto"
+                        >
+                          <ChakraText fontSize="sm" whiteSpace="pre-wrap" fontFamily="mono">
+                            {clipboardContent}
+                          </ChakraText>
+                        </Box>
+                      </ModalBody>
+                      <ModalFooter>
+                        <Button variant="ghost" mr={3} onClick={() => setIsClipboardModalOpen(false)}>
+                          Close
+                        </Button>
+                        <Button
+                          colorScheme="blue"
+                          leftIcon={<Copy size={16} />}
+                          onClick={() => {
+                            navigator.clipboard.writeText(clipboardContent);
+                            toast({ title: "Copied to clipboard", status: "success", duration: 1500 });
+                          }}
+                        >
+                          Copy to Clipboard
+                        </Button>
+                      </ModalFooter>
+                    </ModalContent>
+                  </Modal>
+                </Box>
+              )}
+
+              {/* Collapsed step log */}
+              {steps.length > 0 && (
+                <Box>
+                  <HStack
+                    spacing={2}
+                    cursor="pointer"
+                    onClick={() => setIsStepsCollapsed(!isStepsCollapsed)}
+                    py={2}
+                    px={2}
+                    _hover={{ bg: 'gray.100' }}
+                    borderRadius="md"
+                  >
+                    {!isStepsCollapsed ? (
+                      <ChevronDown size={16} color="#6b7280" />
+                    ) : (
+                      <ChevronRight size={16} color="#6b7280" />
+                    )}
+                    <ChakraText fontSize="xs" fontWeight="semibold" color="gray.500" textTransform="uppercase" letterSpacing="wide">
+                      {steps.length} {steps.length === 1 ? "step" : "steps"} executed
+                    </ChakraText>
+                  </HStack>
+                  <Collapse in={!isStepsCollapsed} animateOpacity>
+                    <VStack spacing={2} align="stretch" mt={2} pl={6}>
+                      {steps.map((step) => (
+                        <Box
+                          key={step.id}
+                          bg="white"
+                          px={4}
+                          py={3}
+                          borderRadius="md"
+                          borderLeft="3px solid"
+                          borderLeftColor={
+                            step.status === "completed" ? "green.400" :
+                            step.status === "error" ? "red.400" : "blue.400"
+                          }
+                        >
+                          <HStack spacing={2} align="start">
+                            <ChakraText fontSize="xs" color="gray.400" minW="40px">
+                              {step.timestamp}
+                            </ChakraText>
+                            <ChakraText fontSize="sm" color="gray.700" flex={1}>
+                              {step.explanation || 'Step executed'}
+                            </ChakraText>
+                          </HStack>
+                          {step.error && (
+                            <ChakraText fontSize="xs" color="red.500" mt={1} ml="48px">
+                              {step.error}
+                            </ChakraText>
+                          )}
+                        </Box>
                       ))}
                     </VStack>
-                  </Box>
-                )}
-
-                {currentPhase.nextPhaseHint && (
-                  <ChakraText fontSize="xs" color="purple.500" fontStyle="italic">
-                    Next: {currentPhase.nextPhaseHint}
-                  </ChakraText>
-                )}
-              </VStack>
-            </Box>
-          )}
-
-          {steps.length === 0 ? (
-            <Flex justify="center" align="center" height="200px">
-              <VStack spacing={4}>
-                <Spinner size="lg" color="blue.500" />
-                <Text type="m" secondary>
-                  {currentPhase ? "Starting phase execution..." : "Initializing the agent..."}
-                </Text>
-              </VStack>
-            </Flex>
+                  </Collapse>
+                </Box>
+              )}
+            </>
           ) : (
-            steps.map((step, index) => (
-              <Box
-                key={step.id}
-                bg="white"
-                padding={4}
-                borderRadius="md"
-                border="1px solid"
-                borderColor={
-                  index === currentStepIndex && step.status === "executing"
-                    ? "blue.400"
-                    : "gray.200"
-                }
-                boxShadow={
-                  index === currentStepIndex && step.status === "executing"
-                    ? "0 0 0 3px rgba(66, 153, 225, 0.1)"
-                    : "sm"
-                }
+            <>
+              {/* === RUNNING: Live step-by-step view === */}
+
+              {/* Layout toggle */}
+              <Flex justify="flex-end" mb={3}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  borderColor={splitLayout ? "purple.300" : "gray.300"}
+                  bg={splitLayout ? "purple.50" : "white"}
+                  color={splitLayout ? "purple.700" : "gray.700"}
+                  fontWeight="medium"
+                  leftIcon={splitLayout ? <Rows2 size={14} /> : <Columns2 size={14} />}
+                  onClick={() => setSplitLayout((s) => !s)}
+                  _hover={{ bg: splitLayout ? "purple.100" : "gray.50" }}
+                >
+                  {splitLayout ? "Stacked view" : "Split view"}
+                </Button>
+              </Flex>
+
+              <Flex
+                direction={splitLayout ? { base: "column", md: "row" } : "column"}
+                gap={splitLayout ? 4 : 0}
+                align="stretch"
               >
-                <HStack align="start" spacing={3}>
-                  <Box pt={1}>{getStepIcon(step.status)}</Box>
-                  <VStack align="start" spacing={2} flex={1}>
-                    <HStack>
-                      <Text type="s" secondary>
-                        {step.timestamp}
-                      </Text>
-                      <Badge colorScheme={getStepBadgeColor(step.status)} size="sm">
-                        {step.status}
-                      </Badge>
-                    </HStack>
-                    
-                    {step.explanation && (
-                      <Box>
-                        <Box mb={1}>
-                          <Text type="s" bold>
-                            What I'm doing:
-                          </Text>
-                        </Box>
-                        <ChakraText fontSize="sm" color="gray.700">
-                          {step.explanation}
-                        </ChakraText>
+                <Box flex={splitLayout ? "0 0 42%" : "auto"} minW={0}>
+
+              {/* Completed phases — collapsed summary rows */}
+              {completedPhases.length > 0 && (
+                <VStack align="stretch" spacing={1.5} mb={3}>
+                  {completedPhases.map((p) => (
+                    <Flex
+                      key={`${p.phaseNumber}-${p.phaseName}`}
+                      align="center"
+                      gap={2.5}
+                      px={3}
+                      py={2}
+                      bg="gray.50"
+                      border="1px solid"
+                      borderColor="gray.200"
+                      borderRadius="md"
+                    >
+                      <Flex
+                        w="16px"
+                        h="16px"
+                        bg="green.500"
+                        color="white"
+                        borderRadius="full"
+                        align="center"
+                        justify="center"
+                        flexShrink={0}
+                      >
+                        <CheckCircle size={10} strokeWidth={3} />
+                      </Flex>
+                      <Flex
+                        bg="purple.100"
+                        color="purple.700"
+                        px={2}
+                        py={0.5}
+                        borderRadius="sm"
+                        fontSize="2xs"
+                        fontWeight="bold"
+                        letterSpacing="wider"
+                        flexShrink={0}
+                      >
+                        {`PHASE ${p.phaseNumber}`}
+                      </Flex>
+                      <ChakraText fontSize="sm" fontWeight="medium" color="gray.800" noOfLines={1} flex={1}>
+                        {p.phaseName}
+                      </ChakraText>
+                      <ChakraText fontSize="xs" color="gray.500" flexShrink={0}>
+                        {`${p.steps.length} steps`}
+                      </ChakraText>
+                    </Flex>
+                  ))}
+                </VStack>
+              )}
+
+              {/* Current Phase Plan (Agent Mode) — collapses once steps start streaming */}
+              {currentPhase && (
+                isPhaseCardCollapsed ? (
+                  <Flex
+                    as="button"
+                    onClick={() => setIsPhaseCardCollapsed(false)}
+                    bg="white"
+                    border="1px solid"
+                    borderColor="gray.200"
+                    borderLeft="3px solid"
+                    borderLeftColor="purple.500"
+                    borderRadius="md"
+                    px={4}
+                    py={2.5}
+                    mb={4}
+                    align="center"
+                    gap={2.5}
+                    w="full"
+                    cursor="pointer"
+                    _hover={{ bg: "gray.50" }}
+                    boxShadow="sm"
+                  >
+                    <Flex
+                      bg="purple.600"
+                      color="white"
+                      px={2}
+                      py={0.5}
+                      borderRadius="sm"
+                      fontSize="xs"
+                      fontWeight="bold"
+                      letterSpacing="wider"
+                      flexShrink={0}
+                    >
+                      {`PHASE ${currentPhase.phaseNumber}`}
+                    </Flex>
+                    <ChakraText fontSize="sm" fontWeight="semibold" color="gray.900" noOfLines={1} flex={1} textAlign="left">
+                      {currentPhase.phaseName}
+                    </ChakraText>
+                    <ChakraText fontSize="xs" color="gray.500" flexShrink={0}>
+                      {`Step ${Math.max(currentStepIndex + 1, 1)} of ${currentPhase.steps.length || steps.length}`}
+                    </ChakraText>
+                    <Box color="gray.400" flexShrink={0}>
+                      <ChevronRight size={16} />
+                    </Box>
+                  </Flex>
+                ) : (
+                  <Box
+                    bg="white"
+                    padding={5}
+                    borderRadius="md"
+                    border="1px solid"
+                    borderColor="gray.200"
+                    borderLeft="3px solid"
+                    borderLeftColor="purple.500"
+                    boxShadow="sm"
+                    mb={4}
+                    position="relative"
+                  >
+                    {steps.length > 0 && (
+                      <Box
+                        as="button"
+                        onClick={() => setIsPhaseCardCollapsed(true)}
+                        position="absolute"
+                        top={3}
+                        right={3}
+                        color="gray.400"
+                        _hover={{ color: "gray.700" }}
+                        aria-label="Collapse plan"
+                      >
+                        <ChevronDown size={16} />
                       </Box>
                     )}
-                    
-                    {step.nextStep && step.status === "executing" && (
-                      <Box
-                        bg="blue.50"
-                        p={3}
-                        borderRadius="sm"
-                        borderLeft="3px solid"
-                        borderColor="blue.400"
-                        width="100%"
-                      >
-                        <Box mb={1}>
-                          <ChakraText fontSize="sm" fontWeight="bold" color="blue.700">
-                            Next Step:
+                    <VStack align="start" spacing={3.5}>
+                      <HStack spacing={2.5}>
+                        <Flex
+                          bg="purple.600"
+                          color="white"
+                          px={2}
+                          py={0.5}
+                          borderRadius="sm"
+                          fontSize="xs"
+                          fontWeight="bold"
+                          letterSpacing="wider"
+                        >
+                          {`PHASE ${currentPhase.phaseNumber}`}
+                        </Flex>
+                        <ChakraText fontSize="lg" fontWeight="semibold" color="gray.900">
+                          {currentPhase.phaseName}
+                        </ChakraText>
+                      </HStack>
+
+                      {currentPhase.goal && (
+                        <Box>
+                          <ChakraText fontSize="xs" fontWeight="bold" color="gray.500" textTransform="uppercase" letterSpacing="wider" mb={1}>
+                            Goal
+                          </ChakraText>
+                          <ChakraText fontSize="md" color="gray.800" lineHeight="1.55">
+                            {currentPhase.goal}
                           </ChakraText>
                         </Box>
-                        <ChakraText fontSize="sm" color="blue.700">
-                          {step.nextStep}
-                        </ChakraText>
-                      </Box>
-                    )}
-                    
-                    {step.error && (
-                      <Box
-                        bg="red.50"
-                        p={3}
-                        borderRadius="sm"
-                        borderLeft="3px solid"
-                        borderColor="red.400"
-                        width="100%"
-                      >
-                        <Box mb={1}>
-                          <ChakraText fontSize="sm" fontWeight="bold" color="red.700">
-                            Error:
+                      )}
+
+                      {currentPhase.steps.length > 0 && (
+                        <Box width="100%">
+                          <ChakraText fontSize="xs" fontWeight="bold" color="gray.500" textTransform="uppercase" letterSpacing="wider" mb={2}>
+                            {`Plan · ${currentPhase.steps.length} steps`}
                           </ChakraText>
+                          <VStack align="stretch" spacing={1.5}>
+                            {currentPhase.steps.map((step, idx) => (
+                              <HStack key={idx} align="flex-start" spacing={2.5}>
+                                <ChakraText fontSize="sm" color="gray.400" fontFamily="mono" lineHeight="1.55" flexShrink={0} minW="20px" fontWeight="semibold">
+                                  {idx + 1}.
+                                </ChakraText>
+                                <ChakraText fontSize="sm" color="gray.800" lineHeight="1.55">
+                                  {step}
+                                </ChakraText>
+                              </HStack>
+                            ))}
+                          </VStack>
                         </Box>
-                        <ChakraText fontSize="sm" color="red.700">
-                          {step.error}
+                      )}
+
+                      {currentPhase.nextPhaseHint && (
+                        <ChakraText fontSize="sm" color="gray.500" fontStyle="italic">
+                          Next: {currentPhase.nextPhaseHint}
                         </ChakraText>
-                      </Box>
-                    )}
-                    
-                    {/* Terminal output for this step */}
-                    {step.terminalProcessId && (
-                      <Box width="100%">
-                        <TerminalOutput
-                          processId={step.terminalProcessId}
-                          command={step.terminalCommand}
-                          defaultCollapsed={step.status === "completed"}
-                          maxHeight="250px"
-                        />
-                      </Box>
-                    )}
+                      )}
+                    </VStack>
+                  </Box>
+                )
+              )}
+
+                </Box>
+                <Box flex={splitLayout ? "1 1 58%" : "auto"} minW={0}>
+
+              {steps.length === 0 ? (
+                <Flex justify="center" align="center" height="200px">
+                  <VStack spacing={4}>
+                    <Spinner size="lg" color="blue.500" />
+                    <Text type="m" secondary>
+                      {currentPhase ? "Starting phase execution..." : "Initializing the agent..."}
+                    </Text>
                   </VStack>
-                </HStack>
-              </Box>
-            ))
+                </Flex>
+              ) : (
+                steps.map((step, index) => (
+                  <Box
+                    key={step.id}
+                    bg="white"
+                    padding={4}
+                    borderRadius="md"
+                    border="1px solid"
+                    borderColor={
+                      index === currentStepIndex && step.status === "executing"
+                        ? "blue.400"
+                        : "gray.200"
+                    }
+                    boxShadow={
+                      index === currentStepIndex && step.status === "executing"
+                        ? "0 0 0 3px rgba(66, 153, 225, 0.1)"
+                        : "sm"
+                    }
+                  >
+                    <HStack align="start" spacing={3}>
+                      <Box pt={1}>{getStepIcon(step.status)}</Box>
+                      <VStack align="start" spacing={2} flex={1}>
+                        <HStack>
+                          <Text type="s" secondary>
+                            {step.timestamp}
+                          </Text>
+                          <Badge colorScheme={getStepBadgeColor(step.status)} size="sm">
+                            {step.status}
+                          </Badge>
+                        </HStack>
+
+                        {step.explanation && (
+                          <Box>
+                            <Box mb={1}>
+                              <Text type="s" bold>
+                                What I'm doing:
+                              </Text>
+                            </Box>
+                            <ChakraText fontSize="sm" color="gray.700">
+                              {step.explanation}
+                            </ChakraText>
+                          </Box>
+                        )}
+
+                        {step.nextStep && step.status === "executing" && (
+                          <Box
+                            bg="blue.50"
+                            p={3}
+                            borderRadius="sm"
+                            borderLeft="3px solid"
+                            borderColor="blue.400"
+                            width="100%"
+                          >
+                            <Box mb={1}>
+                              <ChakraText fontSize="sm" fontWeight="bold" color="blue.700">
+                                Next Step:
+                              </ChakraText>
+                            </Box>
+                            <ChakraText fontSize="sm" color="blue.700">
+                              {step.nextStep}
+                            </ChakraText>
+                          </Box>
+                        )}
+
+                        {step.error && (
+                          <Box
+                            bg="red.50"
+                            p={3}
+                            borderRadius="sm"
+                            borderLeft="3px solid"
+                            borderColor="red.400"
+                            width="100%"
+                          >
+                            <Box mb={1}>
+                              <ChakraText fontSize="sm" fontWeight="bold" color="red.700">
+                                Error:
+                              </ChakraText>
+                            </Box>
+                            <ChakraText fontSize="sm" color="red.700">
+                              {step.error}
+                            </ChakraText>
+                          </Box>
+                        )}
+
+                        {/* Terminal output for this step */}
+                        {step.terminalProcessId && (
+                          <Box width="100%">
+                            <TerminalOutput
+                              processId={step.terminalProcessId}
+                              command={step.terminalCommand}
+                              defaultCollapsed={step.status === "completed"}
+                              maxHeight="250px"
+                            />
+                          </Box>
+                        )}
+                      </VStack>
+                    </HStack>
+                  </Box>
+                ))
+              )}
+
+                </Box>
+              </Flex>
+            </>
           )}
         </VStack>
       </Box>

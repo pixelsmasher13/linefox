@@ -175,19 +175,12 @@ Describe how the AI should behave when this role is active.
 
   return (
     <Box h="100%" display="flex" flexDirection="column">
-      {/* Skills List */}
       {isLoading ? (
         <Flex justify="center" py={8}>
           <Spinner size="sm" />
         </Flex>
       ) : skills.length === 0 ? (
-        <Flex
-          direction="column"
-          align="center"
-          justify="center"
-          py={6}
-          color="gray.500"
-        >
+        <Flex direction="column" align="center" justify="center" py={6} color="gray.500">
           <Text fontSize="sm" mb={2}>No skills yet</Text>
           <Button size="xs" onClick={() => handleCreateNew('site')}>
             Create your first skill

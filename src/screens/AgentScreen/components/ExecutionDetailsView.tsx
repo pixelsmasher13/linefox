@@ -234,18 +234,6 @@ export const ExecutionDetailsView: React.FC<ExecutionDetailsViewProps> = ({ exec
                 onClose={() => {}}
               />
             )}
-            {onSchedule && (execution.run.status === 'completed' || execution.run.status === 'stopped') && (
-              <Tooltip label="Run on a schedule">
-                <Button
-                  size="sm"
-                  leftIcon={<CalendarClock size={14} />}
-                  variant="outline"
-                  onClick={() => onSchedule(execution.run.automation_id, execution.run.id)}
-                >
-                  Schedule
-                </Button>
-              </Tooltip>
-            )}
             {onEdit && (
               <Tooltip label="Edit task plan">
                 <Button
@@ -255,6 +243,18 @@ export const ExecutionDetailsView: React.FC<ExecutionDetailsViewProps> = ({ exec
                   onClick={() => onEdit(execution.run.automation_id)}
                 >
                   Edit
+                </Button>
+              </Tooltip>
+            )}
+            {onSchedule && (execution.run.status === 'completed' || execution.run.status === 'stopped') && (
+              <Tooltip label="Run on a schedule">
+                <Button
+                  size="sm"
+                  leftIcon={<CalendarClock size={14} />}
+                  variant="outline"
+                  onClick={() => onSchedule(execution.run.automation_id, execution.run.id)}
+                >
+                  Schedule
                 </Button>
               </Tooltip>
             )}
@@ -287,7 +287,7 @@ export const ExecutionDetailsView: React.FC<ExecutionDetailsViewProps> = ({ exec
         }}
       >
         <VStack spacing={4} align="stretch" maxW="800px" mx="auto">
-          {/* Render conversation segments */}
+          {/* Render conversation segments (objective bubbles + collapsed steps) */}
           {conversationSegments.map((segment, segmentIndex) => (
             <Box key={segmentIndex}>
               {/* User message bubble */}
@@ -330,7 +330,7 @@ export const ExecutionDetailsView: React.FC<ExecutionDetailsViewProps> = ({ exec
                       {segment.actionSteps.length} steps executed
                     </ChakraText>
                   </HStack>
-                  
+
                   <Collapse in={expandedSegments.has(segmentIndex)} animateOpacity>
                     <VStack spacing={2} align="stretch" mt={2} pl={6}>
                       {segment.actionSteps.map((step) => (
@@ -368,22 +368,18 @@ export const ExecutionDetailsView: React.FC<ExecutionDetailsViewProps> = ({ exec
             </Box>
           ))}
 
-          {/* Final completion message */}
+          {/* Completion summary — after conversation flow */}
           {execution.run.completion_message && execution.run.status === "completed" && (
-            <Flex justify="flex-start">
-              <Box
-                bg="white"
-                px={4}
-                py={3}
-                borderRadius="xl"
-                borderTopLeftRadius="sm"
-                border="1px solid"
-                borderColor="gray.200"
-                maxW="85%"
-              >
-                  <MarkdownContent content={execution.run.completion_message!} />
-              </Box>
-            </Flex>
+            <Box
+              bg="white"
+              padding={5}
+              borderRadius="lg"
+              border="1px solid"
+              borderColor="gray.200"
+              boxShadow="sm"
+            >
+              <MarkdownContent content={execution.run.completion_message!} />
+            </Box>
           )}
 
           {/* Status message for stopped/interrupted executions */}
