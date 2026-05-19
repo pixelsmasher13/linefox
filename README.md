@@ -8,7 +8,7 @@
 
 Most AI tools talk to you. Linefox works *for* you. Describe a task in plain English — `"find Tesla's latest 10-K, pull segment revenue + capex into the open Excel sheet, and Slack the summary to me"` — and Linefox plans the steps, drives the real apps you already use logged-in, and reports back. No recording. No setup. No babysitting.
 
-[**linefox.ai**](https://linefox.ai) · MIT license · macOS
+[**Download for macOS**](https://github.com/pixelsmasher13/linefox/releases/latest) · [linefox.ai](https://linefox.ai) · MIT license · macOS
 
 ## What it does
 
